@@ -1,18 +1,29 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import auth, dlq, jobs, orgs, projects, queues, retry_policies
+from app.api import auth, dlq, jobs, metrics, orgs, projects, queues, retry_policies
 from app.config import get_settings
 from app.core.errors import register_exception_handlers
 from app.core.logging import RequestLoggingMiddleware, configure_logging
+from app.ws.publisher import publisher
+from app.ws.router import router as ws_router
 
 settings = get_settings()
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    publisher.start()
+    yield
+    await publisher.stop()
 
 
 def create_app() -> FastAPI:
     configure_logging()
 
-    app = FastAPI(title=settings.app_name, version="0.1.0")
+    app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)
 
     app.add_middleware(
         CORSMiddleware,
@@ -33,6 +44,8 @@ def create_app() -> FastAPI:
     app.include_router(queues.router, prefix=api_v1)
     app.include_router(jobs.router, prefix=api_v1)
     app.include_router(dlq.router, prefix=api_v1)
+    app.include_router(metrics.router, prefix=api_v1)
+    app.include_router(ws_router, prefix=api_v1)
 
     @app.get("/health")
     async def health() -> dict:
