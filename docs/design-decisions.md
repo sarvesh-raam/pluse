@@ -1,12 +1,164 @@
 # Design decisions
 
-This document is built up across the build phases. This first pass (Phase 8)
-covers the eight bonus features from §10, each as its own labeled section per
-spec. Phase 9 adds the remaining core trade-off sections (Postgres vs. Redis,
-normalization, cascades, at-least-once vs. exactly-once, retry/jitter,
-idempotency) above this line.
+Two parts: the core system's trade-offs (§13 checklist), then the eight
+bonus features from §10, each its own labeled section, added in Phase 8.
 
 ---
+
+# Part 1 — Core trade-offs
+
+## Why Postgres, not Redis/RabbitMQ
+
+The spec's own framing (§4.2): "transactional job state + `SKIP LOCKED`
+gives atomic claiming without a second datastore; simpler ops, stronger
+consistency for an assignment." Concretely, three things a Redis+Postgres
+split would have to solve that a single Postgres instance gets for free:
+
+1. **Atomicity between "claim" and "everything else."** A job's state
+   (status, attempts, worker assignment) and its history (executions, logs,
+   DLQ) live in the same database as the claim operation itself. There's no
+   dual-write problem (claim succeeds in Redis, but the corresponding
+   Postgres row update fails or races) to reason about, because there's only
+   one system of record.
+2. **Crash recovery falls out of the schema.** The reaper's visibility-timeout
+   sweep is a plain `UPDATE ... WHERE` against the same table the claim query
+   reads — no separate "visibility timeout" primitive (like SQS's) to
+   replicate, no TTL keys to keep in sync with row state.
+3. **One fewer moving part for an assignment evaluated on engineering
+   quality, not on production request volume.** Redis buys raw claim-latency
+   headroom at higher scale (its single-threaded claim operations can be
+   faster than a round trip to Postgres under very high contention) — this
+   system doesn't operate anywhere near the point where that trade-off pays
+   for itself. Documented as the explicit scale-out path below, not treated
+   as a compromise made *for lack of understanding it*.
+
+**When Redis (or similar) would actually earn its place:** past the point
+where a single Postgres primary's connection count or write throughput is
+the bottleneck — i.e. once you need to shard claim traffic across multiple
+independent claim coordinators. That's exactly the point queue sharding
+(bonus §7, below) targets, and it's a documented next step for the same
+reason Redis is: not needed at this scale, worth knowing the shape of the
+next step regardless.
+
+## `FOR UPDATE SKIP LOCKED` — the core claim guarantee
+
+Full query and rationale for the advisory-lock layer live in bonus §4
+(distributed locking) since that's where the "two workers, one job" and
+"two workers, over-claiming past concurrency_limit" races are described in
+detail — repeating the mechanism here would just duplicate that section.
+The short version for this list: `SKIP LOCKED` is what makes claiming
+*lock-free from the caller's perspective* — a worker never blocks waiting
+for another worker's in-flight claim to finish, it just moves on to the next
+unlocked candidate row. That property is what makes horizontal worker
+scaling trivial (§ architecture.md) without a coordinator process.
+
+## Normalization (3NF) and why executions/logs aren't columns on `jobs`
+
+`jobs` is deliberately lean: no history, no per-attempt error text, no log
+lines. Every one of those lives in a child table (`job_executions`,
+`job_logs`) instead, for a concrete performance reason, not just textbook
+normalization: **the claim query's index (`idx_jobs_claim`) has to stay
+small and dense**, because it's read on every single poll from every single
+worker. If `jobs` carried a growing history of attempts and log text inline,
+every row would grow monotonically over its lifetime, bloating the table
+(and therefore the index, and therefore cache-friendliness) for data that
+the claim query never needs to look at. Splitting it out means `jobs` rows
+are effectively fixed-size, and the claim-critical index stays small
+regardless of how chatty a job's execution history gets.
+
+`retry_policies` is lifted out of both `queues` and `jobs` for the more
+ordinary reason: without it, every queue (and potentially every job) that
+wants "exponential backoff, base 2s, max 60s, 5 attempts" would either
+duplicate those five fields or all reference some ad-hoc convention — a
+transitive dependency in all but name. Naming it once and referencing it by
+FK is the textbook 3NF fix, and it also means changing a policy's numbers
+retroactively applies to everything referencing it (arguably also a
+feature, not just normalization hygiene).
+
+## Cascades: three different ON DELETE behaviors, three different intentions
+
+- **`CASCADE`** everywhere a child row is *meaningless* without its parent —
+  deleting a project should tear down its queues → jobs → executions → logs
+  → DLQ entries cleanly, because none of that history means anything once
+  the project it belongs to is gone. Same logic for org → members/projects,
+  queue → jobs/scheduled_jobs/DLQ, job → executions/logs/DLQ.
+- **`SET NULL`** everywhere a child row's *history* should outlive its
+  parent — deleting a worker (deregistering old infrastructure) should not
+  delete the jobs it ran; it should just null out `worker_id` on
+  `jobs`/`job_executions` and leave the row as "some now-gone worker ran
+  this." Same logic for `queues.retry_policy_id` (deleting a retry policy
+  shouldn't delete the queues using it, just make them fall back to the
+  handler-level default) and `jobs.scheduled_job_id` (deleting a cron
+  template shouldn't retroactively delete jobs it already spawned).
+- **No FK at all** for `jobs.depends_on` and `jobs.batch_id` — see
+  er-diagram.md for why (arrays of FKs aren't expressible in Postgres DDL,
+  and `batch_id` is a grouping value with no single parent row to point at).
+
+## At-least-once, not exactly-once, delivery — and where exactly-once *is* guaranteed
+
+Two different guarantees get conflated if you're not careful, and this
+system deliberately gives different answers to each:
+
+- **"Will a queued job eventually run?"** — yes, guaranteed, but
+  **at-least-once**. The reaper's visibility-timeout requeue is the
+  mechanism: if a worker dies mid-execution, its claimed job gets reset to
+  `queued` once its heartbeat goes stale, and another worker picks it up.
+  That worker doesn't know whether the *previous* attempt actually finished
+  (it might have completed the side effect and then died before writing
+  `status=completed`) — hence at-least-once, not exactly-once.
+- **"Will two workers ever both think they own the same job at the same
+  time?"** — no, this *is* exactly-once, guaranteed by `FOR UPDATE SKIP
+  LOCKED` (bonus §4) plus the `lock_token` fencing check on every
+  subsequent write. A worker that's been reaped can't silently keep writing
+  to a job another worker has since claimed.
+
+The gap between these two guarantees is exactly why **handlers need to be
+idempotent** (§5.4/next section) — the system guarantees a job won't be
+*claimed* twice concurrently, but does not guarantee a handler's side effect
+(an email sent, an API called) never happens twice across a crash-and-retry
+sequence. That's an inherent property of any at-least-once system without
+distributed transactions across the side effect and the DB, not something
+worth "fixing" by claiming a false exactly-once guarantee.
+
+## Retry strategies and jitter
+
+Three strategies (`fixed`/`linear`/`exponential`) cover the three shapes of
+"how aggressively should this back off" a real system needs: fixed for
+handlers where the failure cause is unlikely to be load-related (a
+misconfigured URL isn't going to fix itself faster or slower based on
+delay), linear for moderate escalation, exponential for handlers most likely
+to be failing *because of* transient load (rate limits, timeouts) where
+rapid escalation actually reduces contention. `jitter_pct` exists
+specifically to prevent the thundering-herd case exponential backoff is
+otherwise prone to: if 50 jobs fail at the same instant (e.g. a downstream
+outage) and all retry on the exact same exponential schedule, they all
+re-hit the (possibly still-recovering) downstream at the exact same instants
+again. `± jitter_pct` randomization spreads that back out.
+
+## Idempotency: two different layers for two different failure modes
+
+- **Enqueue-time**, DB-enforced: `uq_jobs_idem (queue_id, idempotency_key)
+  WHERE idempotency_key IS NOT NULL` — a partial unique index, so a
+  duplicate `POST /jobs` with the same key can never create a second row,
+  even under concurrent requests (verified in Phase 3/9: the race where two
+  requests hit the constraint at the same instant is caught via
+  `IntegrityError` and resolved by re-fetching the winning row — see
+  `test_idempotency.py`).
+- **Execution-time**, a documentation/design requirement on handlers
+  themselves: the `lock_token` fencing guard prevents the *system* from
+  double-executing a job, but if a handler's side effect isn't naturally
+  idempotent (e.g. "charge this card" rather than "set this flag"), an
+  at-least-once retry could still re-trigger it. This is why §11's demo
+  handlers are deliberately simple/side-effect-free (sleep, compute,
+  deliberate failures) rather than claiming to demonstrate idempotent
+  external side effects — that's a handler-author responsibility the
+  platform enables (via `idempotency_key`, available in `payload` to a
+  handler that wants to de-duplicate its own external calls) but can't fully
+  enforce for arbitrary user code.
+
+---
+
+# Part 2 — Bonus features (§10)
 
 ## 1. WebSocket live updates
 

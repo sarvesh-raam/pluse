@@ -128,8 +128,11 @@ async def create_job(
         queue.retry_policy.max_attempts if queue.retry_policy else 3
     )
 
+    queue_id = queue.id  # captured before the try block: touching `queue`
+    # again after a rollback below would hit an expired-attribute reload
+    # outside of an awaited context (MissingGreenlet) — see IntegrityError branch.
     job = Job(
-        queue_id=queue.id,
+        queue_id=queue_id,
         type=body.type,
         status=job_status,
         priority=body.priority,
@@ -149,7 +152,7 @@ async def create_job(
         await db.rollback()
         existing = await db.scalar(
             select(Job).where(
-                Job.queue_id == queue.id, Job.idempotency_key == body.idempotency_key
+                Job.queue_id == queue_id, Job.idempotency_key == body.idempotency_key
             )
         )
         if existing is None:
