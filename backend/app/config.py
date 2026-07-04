@@ -13,7 +13,7 @@ class Settings(BaseSettings):
         "postgresql+asyncpg://pulse:pulse@localhost:5432/pulse"
     )
 
-    jwt_secret: str = "change-me-in-prod"
+    jwt_secret: str = "dev-only-please-change-this-secret-before-any-real-deployment"
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 15
     refresh_token_expire_days: int = 7
