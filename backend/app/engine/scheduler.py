@@ -10,6 +10,8 @@ from zoneinfo import ZoneInfo
 
 from app.config import get_settings
 from app.core.logging import configure_logging
+from app.core.notify import notify_jobs_available
+from app.core.ratelimit import registry as rate_limiter
 from app.db import AsyncSessionLocal
 from app.engine import reaper
 from app.models.enums import JobStatus, JobType
@@ -24,24 +26,60 @@ DEFAULT_MAX_ATTEMPTS = 3
 _no_deps = or_(Job.depends_on.is_(None), func.array_length(Job.depends_on, 1).is_(None))
 
 
+_DUE_FILTER = or_(
+    and_(Job.status == JobStatus.scheduled, _no_deps),
+    Job.status == JobStatus.retrying,
+)
+
+
+async def _promote_rate_limited_queue(db: AsyncSession, queue_id, rate_per_sec: float) -> int:
+    """§10 bonus: rate limiting. A queue with rate_limit_per_sec set can only
+    have that many jobs promoted from waiting -> queued per second, via a
+    per-queue token bucket — independent of concurrency_limit, which caps
+    how many run *simultaneously* rather than how fast new ones start."""
+    allowance = rate_limiter.take_available(queue_id, rate_per_sec)
+    if allowance <= 0:
+        return 0
+
+    subq = (
+        select(Job.id)
+        .where(Job.queue_id == queue_id, Job.run_at <= func.now(), _DUE_FILTER)
+        .order_by(Job.priority.desc(), Job.run_at.asc())
+        .limit(allowance)
+    )
+    stmt = (
+        update(Job)
+        .where(Job.id.in_(subq))
+        .values(status=JobStatus.queued, updated_at=func.now())
+    )
+    result = await db.execute(stmt)
+    return result.rowcount or 0
+
+
 async def promote_due_jobs(db: AsyncSession) -> int:
     """§6 step 1: flip due 'scheduled' jobs (with no unresolved deps) and due
     'retrying' jobs to 'queued'. Deps-gated 'scheduled' jobs are excluded here
     — they're promoted exclusively by resolve_dependencies() once every
     referenced job completes, regardless of run_at."""
-    stmt = (
-        update(Job)
-        .where(
-            Job.run_at <= func.now(),
-            or_(
-                and_(Job.status == JobStatus.scheduled, _no_deps),
-                Job.status == JobStatus.retrying,
-            ),
+    rate_limited = (
+        await db.execute(
+            select(Queue.id, Queue.rate_limit_per_sec).where(Queue.rate_limit_per_sec.is_not(None))
         )
-        .values(status=JobStatus.queued, updated_at=func.now())
-    )
+    ).all()
+
+    total = 0
+    for queue_id, rate_per_sec in rate_limited:
+        total += await _promote_rate_limited_queue(db, queue_id, rate_per_sec)
+
+    rate_limited_ids = [row.id for row in rate_limited]
+    stmt = update(Job).where(Job.run_at <= func.now(), _DUE_FILTER)
+    if rate_limited_ids:
+        stmt = stmt.where(Job.queue_id.not_in(rate_limited_ids))
+    stmt = stmt.values(status=JobStatus.queued, updated_at=func.now())
+
     result = await db.execute(stmt)
-    return result.rowcount or 0
+    total += result.rowcount or 0
+    return total
 
 
 async def promote_cron_jobs(db: AsyncSession) -> int:
@@ -125,6 +163,8 @@ async def tick(db: AsyncSession) -> dict[str, int]:
     promoted = await promote_due_jobs(db)
     spawned = await promote_cron_jobs(db)
     deps_resolved = await resolve_dependencies(db)
+    if promoted or spawned or deps_resolved:
+        await notify_jobs_available(db)
     await db.commit()
     return {"promoted": promoted, "spawned": spawned, "deps_resolved": deps_resolved}
 
@@ -157,6 +197,8 @@ async def run_reaper_forever() -> None:
         try:
             async with AsyncSessionLocal() as db:
                 stats = await reaper.reap_dead_workers(db, settings.visibility_timeout_sec)
+                if stats["jobs_requeued"]:
+                    await notify_jobs_available(db)
                 await db.commit()
                 if stats["workers_reaped"]:
                     logger.info("reaper swept dead workers", extra={"extra_fields": stats})

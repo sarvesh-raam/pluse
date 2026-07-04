@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import ConflictError, NotFoundError
+from app.core.notify import notify_jobs_available
 from app.core.pagination import Page, PaginationParams, apply_sort, paginate
 from app.core.scoping import get_queue_scoped
 from app.core.security import get_current_user
@@ -50,6 +51,7 @@ async def replay_dlq_entry(
     await get_queue_scoped(db, entry.queue_id, user, MemberRole.member)
 
     job = await replay_from_dlq(db, entry)
+    await notify_jobs_available(db)
     await db.commit()
     await db.refresh(job)
     return job

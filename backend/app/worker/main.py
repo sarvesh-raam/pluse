@@ -5,13 +5,15 @@ import socket
 import uuid
 from datetime import datetime, timezone
 
+import asyncpg
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from app.config import get_settings
 from app.core.logging import configure_logging
+from app.core.notify import CHANNEL as NOTIFY_CHANNEL
 from app.db import AsyncSessionLocal
-from app.engine import claim, retry
+from app.engine import ai_summary, claim, retry
 from app.models.enums import ExecutionStatus, JobStatus, LogLevel, WorkerStatus
 from app.models.job import Job
 from app.models.job_execution import JobExecution
@@ -35,6 +37,8 @@ class WorkerProcess:
         self.project_id: uuid.UUID | None = None
         self.queue_ids: list[uuid.UUID] = []
         self.shutting_down = False
+        self._wake_event = asyncio.Event()
+        self._notify_conn: asyncpg.Connection | None = None
 
     async def _resolve_project(self, db) -> uuid.UUID:
         while True:
@@ -104,13 +108,39 @@ class WorkerProcess:
             except Exception:
                 logger.exception("heartbeat failed")
 
+    async def setup_notify_listener(self, database_url: str) -> None:
+        """§10 bonus: event-driven execution. LISTEN on the channel the API/
+        scheduler NOTIFY on enqueue/promote/reap, so poll_loop wakes up
+        immediately instead of waiting out its normal interval. Polling
+        stays as the fallback — if this connection can't be established
+        (or drops), the worker still works correctly, just less promptly."""
+        dsn = database_url.replace("postgresql+asyncpg://", "postgresql://")
+        try:
+            self._notify_conn = await asyncpg.connect(dsn)
+            await self._notify_conn.add_listener(NOTIFY_CHANNEL, self._on_notify)
+            logger.info("listening for %r notifications", NOTIFY_CHANNEL)
+        except Exception:
+            logger.exception("LISTEN/NOTIFY setup failed — falling back to polling only")
+            self._notify_conn = None
+
+    def _on_notify(self, _connection, _pid, _channel, _payload) -> None:
+        self._wake_event.set()
+
+    async def close_notify_listener(self) -> None:
+        if self._notify_conn is not None:
+            await self._notify_conn.close()
+
     async def poll_loop(self, interval_sec: float) -> None:
         while not self.shutting_down:
             try:
                 await self._poll_once()
             except Exception:
                 logger.exception("poll iteration failed")
-            await asyncio.sleep(interval_sec)
+            try:
+                await asyncio.wait_for(self._wake_event.wait(), timeout=interval_sec)
+            except asyncio.TimeoutError:
+                pass
+            self._wake_event.clear()
 
     async def _poll_once(self) -> None:
         for queue_id in list(self.queue_ids):
@@ -181,6 +211,10 @@ class WorkerProcess:
             error_message = str(exc)
         duration_ms = int((loop.time() - perf_start) * 1000)
 
+        result_status: JobStatus | None = None
+        execution_id: uuid.UUID | None = None
+        recent_logs: list[str] = []
+
         async with AsyncSessionLocal() as db:
             fresh = await claim.load_for_transition(db, job.id, job.lock_token)
             if fresh is None:
@@ -195,6 +229,7 @@ class WorkerProcess:
                     JobExecution.job_id == job.id, JobExecution.attempt_number == attempt
                 )
             )
+            execution_id = execution.id
             finished_at = datetime.now(timezone.utc)
 
             if success:
@@ -226,6 +261,18 @@ class WorkerProcess:
                 result_status = await retry.apply_failure(
                     db, fresh, retry_policy, error_message or "unknown error"
                 )
+
+                if result_status == JobStatus.dead:
+                    log_rows = (
+                        await db.scalars(
+                            select(JobLog.message)
+                            .where(JobLog.job_id == job.id)
+                            .order_by(JobLog.ts.desc())
+                            .limit(10)
+                        )
+                    ).all()
+                    recent_logs = list(reversed(log_rows))
+
                 db.add(
                     JobLog(
                         job_id=job.id,
@@ -247,6 +294,21 @@ class WorkerProcess:
             execution.duration_ms = duration_ms
             await db.commit()
 
+        # AI summary call happens with no open DB transaction/row lock — it's
+        # a network round-trip to Groq that can take several seconds, and
+        # this job is already in its terminal 'dead' state by this point, so
+        # there's no contention to worry about holding up.
+        if result_status == JobStatus.dead and execution_id is not None:
+            summary = await ai_summary.summarize_failure(
+                job.handler, error_message or "unknown error", recent_logs
+            )
+            if summary:
+                async with AsyncSessionLocal() as db:
+                    execution = await db.get(JobExecution, execution_id)
+                    if execution is not None:
+                        execution.ai_summary = summary
+                        await db.commit()
+
     async def shutdown(self, grace_period_sec: float) -> None:
         self.shutting_down = True
         logger.info("draining — waiting up to %.0fs for in-flight jobs", grace_period_sec)
@@ -258,6 +320,7 @@ class WorkerProcess:
                 await db.commit()
 
         await self.runtime.wait_for_idle(timeout=grace_period_sec)
+        await self.close_notify_listener()
 
         async with AsyncSessionLocal() as db:
             worker = await db.get(Worker, self.worker_id)
@@ -280,6 +343,7 @@ async def main() -> None:
         concurrency=settings.worker_concurrency,
     )
     await process.register()
+    await process.setup_notify_listener(settings.database_url)
 
     stop_event = asyncio.Event()
     loop = asyncio.get_event_loop()

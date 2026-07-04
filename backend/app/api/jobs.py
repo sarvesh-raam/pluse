@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.core.errors import ConflictError, ForbiddenError, NotFoundError, UnprocessableError
+from app.core.notify import notify_jobs_available
 from app.core.pagination import Page, PaginationParams, apply_sort, paginate
 from app.core.rbac import ensure_role
 from app.core.scoping import get_job_scoped, get_project_or_404, get_queue_scoped
@@ -141,6 +142,8 @@ async def create_job(
     )
     db.add(job)
     try:
+        if job_status == JobStatus.queued:
+            await notify_jobs_available(db)
         await db.commit()
     except IntegrityError:
         await db.rollback()
@@ -186,6 +189,8 @@ async def create_batch(
         for item in body.jobs
     ]
     db.add_all(jobs)
+    if job_status == JobStatus.queued:
+        await notify_jobs_available(db)
     await db.commit()
     for job in jobs:
         await db.refresh(job)
@@ -296,6 +301,7 @@ async def retry_job(
     job.started_at = None
     job.finished_at = None
 
+    await notify_jobs_available(db)
     await db.commit()
     await db.refresh(job)
     return job
