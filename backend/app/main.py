@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import auth, dlq, jobs, metrics, orgs, projects, queues, retry_policies
+from app.api import auth, dlq, jobs, metrics, orgs, projects, queues, retry_policies, workers
 from app.config import get_settings
 from app.core.errors import register_exception_handlers
 from app.core.logging import RequestLoggingMiddleware, configure_logging
@@ -45,6 +45,7 @@ def create_app() -> FastAPI:
     app.include_router(jobs.router, prefix=api_v1)
     app.include_router(dlq.router, prefix=api_v1)
     app.include_router(metrics.router, prefix=api_v1)
+    app.include_router(workers.router, prefix=api_v1)
     app.include_router(ws_router, prefix=api_v1)
 
     @app.get("/health")
