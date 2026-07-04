@@ -23,6 +23,7 @@ frontend/.vite/
 .vscode/
 .idea/
 .claude/settings.local.json
+.claude/scheduled_tasks.lock
 
 # --- Docker ---
 *.pid

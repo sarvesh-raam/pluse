@@ -51,5 +51,36 @@ services:
         condition: service_healthy
     command: python -m app.engine.scheduler
 
+  seed:
+    build:
+      context: ./backend
+    restart: "no"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://pulse:pulse@postgres:5432/pulse}
+    depends_on:
+      api:
+        condition: service_healthy
+    command: python -m app.seed
+
+  worker:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://pulse:pulse@postgres:5432/pulse}
+      WORKER_PROJECT_SLUG: ${WORKER_PROJECT_SLUG:-demo}
+      WORKER_QUEUES: ${WORKER_QUEUES:-}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-5}
+    depends_on:
+      api:
+        condition: service_healthy
+      seed:
+        condition: service_completed_successfully
+    command: python -m app.worker.main
+
 volumes:
   pulse_pgdata:

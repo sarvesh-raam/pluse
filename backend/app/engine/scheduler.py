@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 from app.config import get_settings
 from app.core.logging import configure_logging
 from app.db import AsyncSessionLocal
+from app.engine import reaper
 from app.models.enums import JobStatus, JobType
 from app.models.job import Job
 from app.models.queue import Queue
@@ -144,9 +145,30 @@ async def run_forever() -> None:
         await asyncio.sleep(settings.sched_tick_sec)
 
 
+async def run_reaper_forever() -> None:
+    settings = get_settings()
+    logger.info(
+        "reaper started",
+        extra={"extra_fields": {"tick_sec": settings.reaper_tick_sec,
+                                 "visibility_timeout_sec": settings.visibility_timeout_sec}},
+    )
+
+    while True:
+        try:
+            async with AsyncSessionLocal() as db:
+                stats = await reaper.reap_dead_workers(db, settings.visibility_timeout_sec)
+                await db.commit()
+                if stats["workers_reaped"]:
+                    logger.info("reaper swept dead workers", extra={"extra_fields": stats})
+        except Exception:
+            logger.exception("reaper tick failed")
+
+        await asyncio.sleep(settings.reaper_tick_sec)
+
+
 async def main() -> None:
     configure_logging()
-    await run_forever()
+    await asyncio.gather(run_forever(), run_reaper_forever())
 
 
 if __name__ == "__main__":
