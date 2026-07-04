@@ -28,7 +28,7 @@ class Job(Base):
         ),
         Index(
             "idx_jobs_due", "run_at",
-            postgresql_where=text("status = 'scheduled'"),
+            postgresql_where=text("status IN ('scheduled', 'retrying')"),
         ),
         Index(
             "uq_jobs_idem", "queue_id", "idempotency_key",
