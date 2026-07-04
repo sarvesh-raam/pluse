@@ -82,5 +82,15 @@ services:
         condition: service_completed_successfully
     command: python -m app.worker.main
 
+  frontend:
+    build:
+      context: ./frontend
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "${FRONTEND_PORT:-5173}:80"
+
 volumes:
   pulse_pgdata:

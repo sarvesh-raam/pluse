@@ -12,9 +12,10 @@ from app.config import get_settings
 from app.core.logging import configure_logging
 from app.db import AsyncSessionLocal
 from app.engine import claim, retry
-from app.models.enums import ExecutionStatus, JobStatus, WorkerStatus
+from app.models.enums import ExecutionStatus, JobStatus, LogLevel, WorkerStatus
 from app.models.job import Job
 from app.models.job_execution import JobExecution
+from app.models.job_log import JobLog
 from app.models.project import Project
 from app.models.queue import Queue
 from app.models.worker import Worker
@@ -141,13 +142,22 @@ class WorkerProcess:
                 return
             fresh.status = JobStatus.running
             fresh.started_at = started_at
+            execution = JobExecution(
+                job_id=job.id,
+                worker_id=self.worker_id,
+                attempt_number=attempt,
+                status=ExecutionStatus.running,
+                started_at=started_at,
+            )
+            db.add(execution)
+            await db.flush()
             db.add(
-                JobExecution(
+                JobLog(
                     job_id=job.id,
-                    worker_id=self.worker_id,
-                    attempt_number=attempt,
-                    status=ExecutionStatus.running,
-                    started_at=started_at,
+                    execution_id=execution.id,
+                    ts=started_at,
+                    level=LogLevel.info,
+                    message=f"Running handler '{job.handler}' (attempt {attempt}/{job.max_attempts})",
                 )
             )
             await db.commit()
@@ -192,6 +202,15 @@ class WorkerProcess:
                 fresh.finished_at = finished_at
                 fresh.lock_token = None
                 execution.status = ExecutionStatus.completed
+                db.add(
+                    JobLog(
+                        job_id=job.id,
+                        execution_id=execution.id,
+                        ts=finished_at,
+                        level=LogLevel.info,
+                        message=f"Completed successfully in {duration_ms}ms",
+                    )
+                )
             else:
                 fresh.attempts = attempt
                 execution.status = ExecutionStatus.failed
@@ -206,6 +225,15 @@ class WorkerProcess:
                 retry_policy = queue.retry_policy if queue else None
                 result_status = await retry.apply_failure(
                     db, fresh, retry_policy, error_message or "unknown error"
+                )
+                db.add(
+                    JobLog(
+                        job_id=job.id,
+                        execution_id=execution.id,
+                        ts=finished_at,
+                        level=LogLevel.error,
+                        message=f"{error_type}: {error_message} (-> {result_status.value})",
+                    )
                 )
                 logger.info(
                     "job failed",
