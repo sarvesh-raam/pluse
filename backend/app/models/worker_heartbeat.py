@@ -22,7 +22,7 @@ class WorkerHeartbeat(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     running_jobs: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    cpu_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
-    mem_mb: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cpu_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ram_mb: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     worker: Mapped["Worker"] = relationship(back_populates="heartbeats")

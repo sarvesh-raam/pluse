@@ -18,6 +18,8 @@ class WorkerOut(BaseModel):
     concurrency: int
     registered_at: datetime
     last_heartbeat_at: datetime | None
+    cpu_percent: float | None = None
+    ram_mb: float | None = None
 
 
 class WorkerHeartbeatOut(BaseModel):
@@ -27,5 +29,5 @@ class WorkerHeartbeatOut(BaseModel):
     worker_id: uuid.UUID
     ts: datetime
     running_jobs: int
-    cpu_pct: float | None
-    mem_mb: int | None
+    cpu_percent: float | None = None
+    ram_mb: float | None = None

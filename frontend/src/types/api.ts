@@ -178,6 +178,8 @@ export interface WorkerInfo {
   concurrency: number
   registered_at: string
   last_heartbeat_at: string | null
+  cpu_percent: number | null
+  ram_mb: number | null
 }
 
 export interface WorkerHeartbeat {
@@ -185,8 +187,8 @@ export interface WorkerHeartbeat {
   worker_id: string
   ts: string
   running_jobs: number
-  cpu_pct: number | null
-  mem_mb: number | null
+  cpu_percent: number | null
+  ram_mb: number | null
 }
 
 export interface DeadLetterEntry {

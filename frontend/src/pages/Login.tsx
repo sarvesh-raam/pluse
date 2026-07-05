@@ -2,7 +2,7 @@ import { type FormEvent, useState } from "react"
 import { Link, useNavigate } from "react-router-dom"
 import { toast } from "sonner"
 import { ArrowRight } from "lucide-react"
-import { authApi, ApiError } from "@/lib/api"
+import { authApi, projectsApi, ApiError } from "@/lib/api"
 import { useAuthStore } from "@/lib/auth-store"
 import { GridBackground } from "@/components/shared/GridBackground"
 
@@ -33,7 +33,8 @@ export function Login() {
       })
       if (me.memberships.length > 0) {
         const firstOrg = me.memberships[0]
-        const firstProject = firstOrg.org.projects?.[0]
+        const projects = await projectsApi.list(firstOrg.org_id)
+        const firstProject = projects.items[0]
         useAuthStore.getState().setWorkspace(firstOrg.org_id, firstProject?.id ?? null)
       }
       navigate("/app/dashboard")

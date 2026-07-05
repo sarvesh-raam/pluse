@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String, func
+from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String, func, Float
 from sqlalchemy.dialects.postgresql import ARRAY, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -31,6 +31,8 @@ class Worker(Base):
     last_heartbeat_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True
     )
+    cpu_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ram_mb: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     project: Mapped["Project"] = relationship(back_populates="workers")
     heartbeats: Mapped[list["WorkerHeartbeat"]] = relationship(

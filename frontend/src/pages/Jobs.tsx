@@ -62,7 +62,7 @@ function EnqueueJobDialog({ projectId }: { projectId: string }) {
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger
         render={
-          <Button size="sm" className="glow-cta">
+          <Button data-tour="enqueue-job-btn" size="sm" className="glow-cta">
             <Plus className="mr-1.5 h-4 w-4" /> Enqueue job
           </Button>
         }
@@ -213,7 +213,9 @@ export function Jobs() {
         </Select>
       </div>
 
-      <JobsTable projectId={projectId} status={status} type={type} page={page} onPageChange={setPage} />
+      <div data-tour="jobs-table">
+        <JobsTable projectId={projectId} status={status} type={type} page={page} onPageChange={setPage} />
+      </div>
     </div>
   )
 }

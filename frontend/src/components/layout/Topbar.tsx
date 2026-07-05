@@ -5,6 +5,8 @@ import { orgsApi, projectsApi } from "@/lib/api"
 import { useAuthStore } from "@/lib/auth-store"
 import { LivePulseBadge } from "@/components/shared/LivePulseBadge"
 import { ThemeToggle } from "@/components/shared/ThemeToggle"
+import { Button } from "@/components/ui/button"
+import { startTour } from "@/lib/tour"
 import {
   Select,
   SelectContent,
@@ -77,6 +79,9 @@ export function Topbar({ connected }: { connected: boolean }) {
       </div>
 
       <div className="flex items-center gap-3">
+        <Button variant="outline" size="sm" onClick={() => startTour(navigate)} className="hidden md:flex">
+          Take a tour
+        </Button>
         <LivePulseBadge connected={connected} />
         <ThemeToggle />
         <DropdownMenu>

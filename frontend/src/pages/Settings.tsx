@@ -36,7 +36,7 @@ function InviteMemberDialog({ orgId }: { orgId: string }) {
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger
         render={
-          <Button size="sm" className="glow-cta">
+          <Button data-tour="invite-member-btn" size="sm" className="glow-cta">
             <Plus className="mr-1.5 h-4 w-4" /> Invite member
           </Button>
         }
@@ -118,7 +118,7 @@ export function Settings() {
         actions={<InviteMemberDialog orgId={orgId} />}
       />
 
-      <div className="overflow-hidden rounded-[var(--radius)] border border-border bg-surface">
+      <div data-tour="members-table" className="overflow-hidden rounded-[var(--radius)] border border-border bg-surface">
         <Table>
           <TableHeader>
             <TableRow>

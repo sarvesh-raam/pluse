@@ -65,7 +65,7 @@ export function Dlq() {
       />
 
       {entries?.items.length ? (
-        <div className="overflow-hidden rounded-[var(--radius)] border border-border bg-surface">
+        <div data-tour="dlq-table" className="overflow-hidden rounded-[var(--radius)] border border-border bg-surface">
           <Table>
             <TableHeader>
               <TableRow>

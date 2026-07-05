@@ -65,6 +65,8 @@ async function refreshAccessToken(): Promise<string | null> {
   return data.access_token as string
 }
 
+const UNAUTHENTICATED_PATHS = ["/auth/login", "/auth/register", "/auth/refresh"]
+
 async function apiFetch<T>(path: string, options: RequestInit = {}, retry = true): Promise<T> {
   const { accessToken } = useAuthStore.getState()
   const headers = new Headers(options.headers)
@@ -73,7 +75,13 @@ async function apiFetch<T>(path: string, options: RequestInit = {}, retry = true
 
   const res = await fetch(`${API_BASE}${path}`, { ...options, headers })
 
-  if (res.status === 401 && retry) {
+  // A 401 from these endpoints means "wrong credentials" or "invalid/expired refresh
+  // token" — never "your access token needs refreshing", so skip the refresh-retry
+  // dance and let the real backend error message (e.g. "Invalid email or password")
+  // surface below instead of being masked by a generic "Session expired".
+  const isUnauthenticatedEndpoint = UNAUTHENTICATED_PATHS.some((p) => path.startsWith(p))
+
+  if (res.status === 401 && retry && !isUnauthenticatedEndpoint) {
     refreshPromise ??= refreshAccessToken().finally(() => {
       refreshPromise = null
     })

@@ -131,14 +131,16 @@ erDiagram
         int concurrency
         timestamptz registered_at
         timestamptz last_heartbeat_at "nullable"
+        float cpu_percent "nullable, latest reading"
+        float ram_mb "nullable, latest reading"
     }
     WORKER_HEARTBEATS {
         uuid id PK
         uuid worker_id FK "ON DELETE CASCADE"
         timestamptz ts
         int running_jobs
-        float cpu_pct "nullable"
-        int mem_mb "nullable"
+        float cpu_percent "nullable"
+        float ram_mb "nullable"
     }
     JOB_LOGS {
         uuid id PK

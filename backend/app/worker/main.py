@@ -3,10 +3,11 @@ import logging
 import signal
 import socket
 import uuid
+import psutil
 from datetime import datetime, timezone
 
 import asyncpg
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import selectinload
 
 from app.config import get_settings
@@ -86,6 +87,8 @@ class WorkerProcess:
         )
 
     async def heartbeat_loop(self, interval_sec: float) -> None:
+        # Trigger initial CPU measurement to avoid 0.0 on first iteration
+        psutil.cpu_percent(interval=None)
         while not self.shutting_down:
             await asyncio.sleep(interval_sec)
             try:
@@ -97,11 +100,20 @@ class WorkerProcess:
                         continue
                     worker.last_heartbeat_at = now
                     worker.queues = self.queue_names or ["*"]
+
+                    mem_mb = psutil.virtual_memory().used / (1024 * 1024)
+                    cpu_pct = psutil.cpu_percent(interval=None)
+
+                    worker.cpu_percent = cpu_pct
+                    worker.ram_mb = mem_mb
+
                     db.add(
                         WorkerHeartbeat(
                             worker_id=self.worker_id,
                             ts=now,
                             running_jobs=self.runtime.running_count,
+                            cpu_percent=cpu_pct,
+                            ram_mb=mem_mb,
                         )
                     )
                     await db.commit()

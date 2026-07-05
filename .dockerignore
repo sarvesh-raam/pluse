@@ -1,0 +1,9 @@
+.git
+backend/.venv
+backend/.pytest_cache
+backend/pulse.egg-info
+backend/__pycache__
+frontend/node_modules
+frontend/dist
+docs
+*.md

@@ -110,7 +110,7 @@ function CreateQueueDialog({ projectId }: { projectId: string }) {
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger
         render={
-          <Button size="sm" className="glow-cta">
+          <Button data-tour="new-queue-btn" size="sm" className="glow-cta">
             <Plus className="mr-1.5 h-4 w-4" /> New queue
           </Button>
         }
@@ -209,7 +209,7 @@ export function Queues() {
       />
 
       {queues?.items.length ? (
-        <div className="overflow-hidden rounded-[var(--radius)] border border-border bg-surface">
+        <div data-tour="queues-table" className="overflow-hidden rounded-[var(--radius)] border border-border bg-surface">
           <Table>
             <TableHeader>
               <TableRow>

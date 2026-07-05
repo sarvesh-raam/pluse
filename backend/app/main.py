@@ -37,6 +37,7 @@ def create_app() -> FastAPI:
     register_exception_handlers(app)
 
     api_v1 = "/api/v1"
+
     app.include_router(auth.router, prefix=api_v1)
     app.include_router(orgs.router, prefix=api_v1)
     app.include_router(projects.router, prefix=api_v1)

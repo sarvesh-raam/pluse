@@ -9,6 +9,7 @@ import { StatCard } from "@/components/shared/StatCard"
 import { StatusPill } from "@/components/shared/StatusPill"
 import { EmptyState } from "@/components/shared/EmptyState"
 import { ThroughputChart } from "@/components/charts/ThroughputChart"
+import { WorkerTelemetryChart } from "@/components/charts/WorkerTelemetryChart"
 import { LoadGenerator } from "@/components/shared/LoadGenerator"
 import { Skeleton } from "@/components/ui/skeleton"
 
@@ -35,18 +36,11 @@ export function Dashboard() {
     queryFn: () => workersApi.list(projectId),
     refetchInterval: 5000,
   })
-  const { data: queues } = useQuery({
-    queryKey: ["queues", projectId],
-    queryFn: () => queuesApi.list(projectId),
-  })
-
-  const firstQueue = queues?.items[0]
-
   return (
     <div>
       <PageHeader eyebrow="Overview" title="Dashboard" description="Live view of your project's job pipeline." />
 
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div data-tour="stat-cards" className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard
           label="Throughput"
           value={overview ? overview.throughput_per_min.toFixed(1) : <Skeleton className="h-9 w-16" />}
@@ -74,7 +68,7 @@ export function Dashboard() {
       </div>
 
       <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-3">
-        <div className="relative rounded-[var(--radius)] border border-border bg-surface p-5 lg:col-span-2">
+        <div data-tour="throughput-chart" className="relative rounded-[var(--radius)] border border-border bg-surface p-5 lg:col-span-2">
           <p className="eyebrow">Throughput</p>
           <h2 className="mt-1 text-sm font-medium text-foreground">Completed vs. failed (last hour)</h2>
           <div className="mt-4">
@@ -111,11 +105,15 @@ export function Dashboard() {
         </div>
       </div>
 
-      <div className="mt-6">
+      <div data-tour="telemetry-chart" className="mt-6">
+        <WorkerTelemetryChart />
+      </div>
+
+      <div data-tour="load-generator" className="mt-6">
         <LoadGenerator />
       </div>
 
-      <div className="mt-6">
+      <div data-tour="recent-failures" className="mt-6">
         <p className="eyebrow">Recent failures</p>
         <h2 className="mt-1 mb-4 text-sm font-medium text-foreground">Needs attention</h2>
         {failedJobs?.items.length ? (

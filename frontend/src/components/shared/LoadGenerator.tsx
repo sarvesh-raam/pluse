@@ -4,7 +4,7 @@ import { useAuthStore } from "@/lib/auth-store"
 import { Play, Loader2, Zap } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { jobsApi } from "@/lib/api"
+import { jobsApi, queuesApi } from "@/lib/api"
 import { cn } from "@/lib/utils"
 
 interface LoadGeneratorProps {
