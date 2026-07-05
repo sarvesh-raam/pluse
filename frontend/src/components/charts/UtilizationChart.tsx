@@ -27,8 +27,10 @@ export function UtilizationChart({ heartbeats }: { heartbeats: WorkerHeartbeat[]
             border: "1px solid var(--color-border)",
             borderRadius: 8,
             fontSize: 12,
+            color: "var(--color-foreground)",
           }}
           labelStyle={{ color: "var(--color-foreground)" }}
+          itemStyle={{ color: "var(--color-muted-foreground)" }}
         />
         <Area type="monotone" dataKey="running" stroke="var(--color-brand)" fill="url(#fillUtil)" strokeWidth={1.5} />
       </AreaChart>

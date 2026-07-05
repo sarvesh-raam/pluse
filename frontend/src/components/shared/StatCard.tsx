@@ -1,5 +1,5 @@
 import type { ReactNode } from "react"
-import { PlusMarks } from "@/components/shared/PlusMarks"
+
 import { cn } from "@/lib/utils"
 
 export function StatCard({
@@ -22,7 +22,7 @@ export function StatCard({
         className
       )}
     >
-      <PlusMarks />
+
       <div className="flex items-start justify-between">
         <p className="eyebrow">{label}</p>
         {icon && <div className="text-muted-foreground">{icon}</div>}

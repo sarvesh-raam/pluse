@@ -4,6 +4,7 @@ import { LogOut } from "lucide-react"
 import { orgsApi, projectsApi } from "@/lib/api"
 import { useAuthStore } from "@/lib/auth-store"
 import { LivePulseBadge } from "@/components/shared/LivePulseBadge"
+import { ThemeToggle } from "@/components/shared/ThemeToggle"
 import {
   Select,
   SelectContent,
@@ -77,6 +78,7 @@ export function Topbar({ connected }: { connected: boolean }) {
 
       <div className="flex items-center gap-3">
         <LivePulseBadge connected={connected} />
+        <ThemeToggle />
         <DropdownMenu>
           <DropdownMenuTrigger className="flex items-center gap-2 rounded-md px-1.5 py-1 outline-none hover:bg-surface-2">
             <Avatar className="h-7 w-7">

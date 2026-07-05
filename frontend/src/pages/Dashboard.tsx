@@ -9,6 +9,7 @@ import { StatCard } from "@/components/shared/StatCard"
 import { StatusPill } from "@/components/shared/StatusPill"
 import { EmptyState } from "@/components/shared/EmptyState"
 import { ThroughputChart } from "@/components/charts/ThroughputChart"
+import { LoadGenerator } from "@/components/shared/LoadGenerator"
 import { Skeleton } from "@/components/ui/skeleton"
 
 export function Dashboard() {
@@ -34,6 +35,12 @@ export function Dashboard() {
     queryFn: () => workersApi.list(projectId),
     refetchInterval: 5000,
   })
+  const { data: queues } = useQuery({
+    queryKey: ["queues", projectId],
+    queryFn: () => queuesApi.list(projectId),
+  })
+
+  const firstQueue = queues?.items[0]
 
   return (
     <div>
@@ -102,6 +109,10 @@ export function Dashboard() {
             View all workers →
           </Link>
         </div>
+      </div>
+
+      <div className="mt-6">
+        <LoadGenerator />
       </div>
 
       <div className="mt-6">

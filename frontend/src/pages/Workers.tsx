@@ -3,7 +3,7 @@ import { useAuthStore } from "@/lib/auth-store"
 import { workersApi } from "@/lib/api"
 import { formatRelative, isFreshHeartbeat } from "@/lib/format"
 import { PageHeader } from "@/components/shared/PageHeader"
-import { PlusMarks } from "@/components/shared/PlusMarks"
+
 import { EmptyState } from "@/components/shared/EmptyState"
 import { UtilizationChart } from "@/components/charts/UtilizationChart"
 import { cn } from "@/lib/utils"
@@ -26,7 +26,7 @@ function WorkerCard({ workerId }: { workerId: string }) {
 
   return (
     <div className="relative rounded-[var(--radius)] border border-border bg-surface p-5">
-      <PlusMarks />
+
       <div className="flex items-start justify-between">
         <div>
           <p className="truncate text-sm font-medium text-foreground">{worker.name}</p>

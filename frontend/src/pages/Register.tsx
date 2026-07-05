@@ -5,7 +5,7 @@ import { ArrowRight } from "lucide-react"
 import { authApi, ApiError } from "@/lib/api"
 import { useAuthStore } from "@/lib/auth-store"
 import { GridBackground } from "@/components/shared/GridBackground"
-import { PlusMarks } from "@/components/shared/PlusMarks"
+
 import { Eyebrow } from "@/components/shared/Eyebrow"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -45,7 +45,7 @@ export function Register() {
     <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-background px-6">
       <GridBackground className="h-[420px]" />
       <div className="relative w-full max-w-sm rounded-[var(--radius)] border border-border bg-surface p-8">
-        <PlusMarks />
+
         <Eyebrow>Get started</Eyebrow>
         <h1 className="mt-1 text-xl font-semibold text-foreground">Create your account</h1>
 

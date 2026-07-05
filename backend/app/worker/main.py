@@ -347,8 +347,13 @@ async def main() -> None:
 
     stop_event = asyncio.Event()
     loop = asyncio.get_event_loop()
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, stop_event.set)
+    import sys
+    if sys.platform == "win32":
+        # Windows does not support add_signal_handler, so we'll rely on KeyboardInterrupt
+        pass
+    else:
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, stop_event.set)
 
     poll_task = asyncio.create_task(process.poll_loop(settings.worker_poll_interval_sec))
     heartbeat_task = asyncio.create_task(process.heartbeat_loop(settings.heartbeat_sec))

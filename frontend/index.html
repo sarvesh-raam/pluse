@@ -1,10 +1,26 @@
 <!doctype html>
-<html lang="en" class="dark">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Pulse</title>
+    <meta name="description" content="Pulse — Distributed job scheduling platform with real-time monitoring, atomic claiming, and retry management." />
+    <title>Pulse — Distributed Job Scheduler</title>
+    <script>
+      // Prevent FOUC: apply theme class before first paint
+      (function () {
+        try {
+          var stored = JSON.parse(localStorage.getItem('pulse-theme') || '{}');
+          var mode = (stored.state && stored.state.mode) || 'dark';
+          if (mode === 'system') {
+            mode = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+          }
+          if (mode === 'dark') document.documentElement.classList.add('dark');
+        } catch (e) {
+          document.documentElement.classList.add('dark');
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

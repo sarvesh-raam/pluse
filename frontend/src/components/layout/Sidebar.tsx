@@ -1,4 +1,4 @@
-import { NavLink } from "react-router-dom"
+import { NavLink, useNavigate } from "react-router-dom"
 import {
   LayoutDashboard,
   ListOrdered,
@@ -7,8 +7,10 @@ import {
   Skull,
   Settings as SettingsIcon,
   Activity,
+  LogOut,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { useAuthStore } from "@/lib/auth-store"
 
 const NAV_ITEMS = [
   { to: "/app/dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -20,6 +22,9 @@ const NAV_ITEMS = [
 ]
 
 export function Sidebar() {
+  const navigate = useNavigate()
+  const logout = useAuthStore((s) => s.logout)
+
   return (
     <aside className="hidden w-56 shrink-0 border-r border-border bg-surface md:flex md:flex-col">
       <div className="flex h-14 items-center gap-2 border-b border-border px-5">
@@ -45,6 +50,18 @@ export function Sidebar() {
           </NavLink>
         ))}
       </nav>
+      <div className="border-t border-border p-3">
+        <button
+          onClick={() => {
+            logout()
+            navigate("/login")
+          }}
+          className="flex w-full items-center gap-2.5 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-surface-2 hover:text-foreground"
+        >
+          <LogOut className="h-4 w-4" />
+          Sign out
+        </button>
+      </div>
     </aside>
   )
 }

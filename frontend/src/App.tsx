@@ -1,9 +1,10 @@
-import type { ReactNode } from "react"
+import { useEffect, type ReactNode } from "react"
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { Toaster } from "@/components/ui/sonner"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { useAuthStore } from "@/lib/auth-store"
+import { useThemeStore, initThemeListener } from "@/lib/theme-store"
 import { AppShell } from "@/components/layout/AppShell"
 import { Landing } from "@/pages/Landing"
 import { Login } from "@/pages/Login"
@@ -31,6 +32,22 @@ function RequireAuth({ children }: { children: ReactNode }) {
 }
 
 export default function App() {
+  const themeMode = useThemeStore((s) => s.mode)
+
+  // Listen for OS theme changes when mode is "system"
+  useEffect(() => {
+    const cleanup = initThemeListener()
+    return cleanup
+  }, [])
+
+  // Resolve the actual theme for the Toaster component
+  const resolvedTheme: "light" | "dark" =
+    themeMode === "system"
+      ? (typeof window !== "undefined" && window.matchMedia("(prefers-color-scheme: dark)").matches
+        ? "dark"
+        : "light")
+      : themeMode
+
   return (
     <QueryClientProvider client={queryClient}>
       <TooltipProvider delay={200}>
@@ -61,7 +78,7 @@ export default function App() {
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </BrowserRouter>
-        <Toaster theme="dark" position="top-right" />
+        <Toaster theme={resolvedTheme} position="top-right" />
       </TooltipProvider>
     </QueryClientProvider>
   )
