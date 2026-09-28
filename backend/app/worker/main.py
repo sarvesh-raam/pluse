@@ -355,7 +355,7 @@ async def main() -> None:
         concurrency=settings.worker_concurrency,
     )
     await process.register()
-    await process.setup_notify_listener(settings.database_url)
+    await process.setup_notify_listener(settings.async_database_url)
 
     stop_event = asyncio.Event()
     loop = asyncio.get_event_loop()

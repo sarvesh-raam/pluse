@@ -22,6 +22,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential libpq-dev curl nginx supervisor \
     && rm -rf /var/lib/apt/lists/*
 
+# Hugging Face Spaces runs as user 1000. Create user and directories.
+RUN useradd -m -u 1000 user && \
+    mkdir -p /app /usr/share/nginx/html /etc/nginx /etc/supervisor/conf.d /var/log/nginx /var/lib/nginx /tmp && \
+    chown -R user:user /app /usr/share/nginx/html /etc/nginx /etc/supervisor /var/log/nginx /var/lib/nginx /tmp
+
 COPY backend/pyproject.toml ./backend/pyproject.toml
 COPY backend/app ./backend/app
 COPY backend/alembic ./backend/alembic
@@ -31,13 +36,16 @@ RUN pip install --no-cache-dir -e "./backend[dev]"
 
 COPY --from=frontend-build /app/frontend/dist /usr/share/nginx/html
 
-COPY deploy/huggingface/nginx.conf /etc/nginx/conf.d/default.conf
-RUN rm -f /etc/nginx/sites-enabled/default
+COPY deploy/huggingface/nginx.conf /etc/nginx/nginx.conf
+RUN rm -rf /etc/nginx/conf.d/* /etc/nginx/sites-enabled/*
 
 COPY deploy/huggingface/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
 COPY deploy/huggingface/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+RUN chmod +x /entrypoint.sh && \
+    chown -R user:user /app /usr/share/nginx/html /etc/nginx /etc/supervisor /tmp /entrypoint.sh
+
+USER user
 
 EXPOSE 7860
 

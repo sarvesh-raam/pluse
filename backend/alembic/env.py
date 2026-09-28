@@ -20,7 +20,7 @@ settings = get_settings()
 
 
 def get_url() -> str:
-    return settings.database_url
+    return settings.async_database_url
 
 
 def run_migrations_offline() -> None:

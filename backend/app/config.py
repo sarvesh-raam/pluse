@@ -18,7 +18,26 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 15
     refresh_token_expire_days: int = 7
 
-    cors_origins: list[str] = ["http://localhost:5173"]
+    cors_origins: list[str] = [
+        "http://localhost:5173",
+        "http://localhost:8000",
+        "http://localhost:7860",
+        "https://huggingface.co",
+    ]
+
+    @property
+    def async_database_url(self) -> str:
+        url = self.database_url
+        if url.startswith("postgres://"):
+            url = url.replace("postgres://", "postgresql+asyncpg://", 1)
+        elif url.startswith("postgresql://") and not url.startswith("postgresql+asyncpg://"):
+            url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        if "sslmode=require" in url:
+            url = url.replace("sslmode=require", "ssl=require")
+        elif "sslmode=" in url:
+            import re
+            url = re.sub(r"sslmode=[^&]+", "ssl=require", url)
+        return url
 
     heartbeat_sec: int = 5
     visibility_timeout_sec: int = 30

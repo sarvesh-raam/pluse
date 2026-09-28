@@ -1,3 +1,13 @@
+---
+title: Pulse
+emoji: ⚡
+colorFrom: indigo
+colorTo: purple
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # Pulse — Distributed Job Scheduler
 
 A production-inspired distributed background-job platform: atomic job
