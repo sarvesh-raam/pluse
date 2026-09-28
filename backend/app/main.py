@@ -54,6 +54,31 @@ def create_app() -> FastAPI:
     async def health() -> dict:
         return {"status": "ok", "app": settings.app_name}
 
+    @app.get("/dbcheck")
+    async def dbcheck() -> dict:
+        import traceback
+        from sqlalchemy import text
+        from app.db import AsyncSessionLocal, engine
+        masked = settings.async_database_url
+        if "@" in masked:
+            masked = "postgresql+asyncpg://***@" + masked.split("@", 1)[1]
+        try:
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(text("SELECT current_database(), version()"))
+                row = result.fetchone()
+                return {
+                    "status": "connected",
+                    "db": row[0],
+                    "pg_version": row[1][:40],
+                    "url_masked": masked,
+                }
+        except Exception as exc:
+            return {
+                "status": "error",
+                "error": str(exc),
+                "url_masked": masked,
+            }
+
     return app
 
 
