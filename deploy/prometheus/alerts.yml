@@ -1,0 +1,53 @@
+groups:
+  - name: pulse
+    rules:
+      - alert: PulseNoLiveWorkers
+        expr: sum(pulse_workers{status=~"active|idle"}) == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: No live workers — queued jobs are not being processed
+
+      - alert: PulseQueueBacklog
+        expr: sum by (project, queue) (pulse_jobs{status="queued"}) > 500
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "Queue {{ $labels.queue }} has a backlog of {{ $value }} jobs"
+
+      - alert: PulseDeadLettersGrowing
+        expr: increase(pulse_reaper_jobs_recovered_total{outcome="dead"}[15m]) > 0 or sum by (project, queue) (delta(pulse_dlq_pending[15m])) > 10
+        labels: {severity: warning}
+        annotations:
+          summary: Jobs are landing in the dead letter queue
+
+      - alert: PulseHighJobFailureRate
+        expr: |
+          sum(rate(pulse_worker_jobs_total{outcome="failure"}[5m]))
+            / clamp_min(sum(rate(pulse_worker_jobs_total[5m])), 1e-9) > 0.25
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: More than 25% of job executions are failing
+
+      - alert: PulseApiErrors
+        expr: |
+          sum(rate(pulse_http_requests_total{status=~"5.."}[5m]))
+            / clamp_min(sum(rate(pulse_http_requests_total[5m])), 1e-9) > 0.05
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: API 5xx rate above 5%
+
+      - alert: PulseSchedulerDown
+        expr: absent(up{job="pulse-scheduler"} == 1) or sum(pulse_scheduler_is_leader) == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: No scheduler replica is leading — delayed/retry/cron jobs are not being promoted
+
+      - alert: PulseWorkersCrashing
+        expr: increase(pulse_reaper_workers_reaped_total[10m]) > 3
+        labels: {severity: warning}
+        annotations:
+          summary: Workers keep dying (reaped {{ $value }} in 10m) — check for OOMs or chaos experiments

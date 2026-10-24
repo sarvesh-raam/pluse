@@ -1,0 +1,64 @@
+# Two replicas for availability. They elect a leader every tick with a
+# Postgres advisory lock (app/engine/scheduler.py), so only one replica
+# promotes jobs and spawns cron runs, and the standby takes over within a
+# tick if the leader pod dies.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pulse-scheduler
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: pulse-scheduler
+  template:
+    metadata:
+      labels:
+        app: pulse-scheduler
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9101"
+    spec:
+      serviceAccountName: pulse-runtime
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: scheduler
+          image: pulse-backend
+          command: ["python", "-m", "app.engine.scheduler"]
+          ports:
+            - {name: metrics, containerPort: 9101}
+          envFrom:
+            - configMapRef: {name: pulse-config}
+            - secretRef: {name: pulse-secrets}
+          livenessProbe:
+            httpGet: {path: /metrics, port: metrics}
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pulse-scheduler-metrics
+  labels:
+    app: pulse-scheduler
+spec:
+  clusterIP: None
+  selector:
+    app: pulse-scheduler
+  ports:
+    - {name: metrics, port: 9101, targetPort: metrics}

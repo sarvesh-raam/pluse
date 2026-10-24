@@ -1,27 +1,39 @@
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
-
-from croniter import croniter
-from sqlalchemy import and_, func, or_, select, update
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 from zoneinfo import ZoneInfo
 
+from croniter import croniter
+from sqlalchemy import and_, delete, func, or_, select, text, update
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+
 from app.config import get_settings
+from app.core import observability as obs
 from app.core.logging import configure_logging
 from app.core.notify import notify_jobs_available
 from app.core.ratelimit import registry as rate_limiter
 from app.db import AsyncSessionLocal
 from app.engine import reaper
-from app.models.enums import JobStatus, JobType
+from app.models.enums import JobStatus, JobType, WorkerStatus
 from app.models.job import Job
 from app.models.queue import Queue
 from app.models.scheduled_job import ScheduledJob
+from app.models.worker import Worker
+from app.models.worker_heartbeat import WorkerHeartbeat
 
 logger = logging.getLogger("pulse.scheduler")
 
 DEFAULT_MAX_ATTEMPTS = 3
+
+# Leader election for running the scheduler as several replicas (e.g. a
+# Kubernetes Deployment with replicas>1 for availability). Each tick runs in
+# one transaction that first tries a transaction-scoped advisory lock; only
+# the replica that gets it does any work, the rest skip that tick. If the
+# leader dies, its lock is released with its connection and another replica
+# takes over on its very next tick — no lease/TTL bookkeeping needed.
+SCHEDULER_LOCK_KEY = 0x50554C53  # "PULS"
+REAPER_LOCK_KEY = 0x50554C52  # "PULR"
 
 _no_deps = or_(Job.depends_on.is_(None), func.array_length(Job.depends_on, 1).is_(None))
 
@@ -93,7 +105,27 @@ async def promote_cron_jobs(db: AsyncSession) -> int:
         )
     ).all()
 
+    now = datetime.now(timezone.utc)
+    spawned = 0
     for sched in due:
+        try:
+            tz = ZoneInfo(sched.timezone)
+            # Advance from max(next_run_at, now), not from next_run_at: after
+            # scheduler downtime, stepping one interval per tick would spawn
+            # a burst of catch-up jobs (one for every missed slot). Missed
+            # runs collapse into the single run spawned below instead.
+            base = max(sched.next_run_at, now).astimezone(tz)
+            next_run_at = croniter(sched.cron_expr, base).get_next(datetime)
+        except Exception:
+            # One broken template (bad tz / cron written straight to the DB)
+            # must not fail the tick for every other schedule — deactivate it.
+            logger.exception(
+                "invalid schedule — deactivating",
+                extra={"extra_fields": {"scheduled_job_id": str(sched.id)}},
+            )
+            sched.is_active = False
+            continue
+
         max_attempts = (
             sched.queue.retry_policy.max_attempts
             if sched.queue.retry_policy
@@ -113,13 +145,11 @@ async def promote_cron_jobs(db: AsyncSession) -> int:
                 scheduled_job_id=sched.id,
             )
         )
+        sched.next_run_at = next_run_at
+        sched.last_run_at = now
+        spawned += 1
 
-        tz = ZoneInfo(sched.timezone)
-        base = sched.next_run_at.astimezone(tz)
-        sched.next_run_at = croniter(sched.cron_expr, base).get_next(datetime)
-        sched.last_run_at = datetime.now(timezone.utc)
-
-    return len(due)
+    return spawned
 
 
 async def resolve_dependencies(db: AsyncSession) -> int:
@@ -129,20 +159,29 @@ async def resolve_dependencies(db: AsyncSession) -> int:
     unrunnable too)."""
     pending = (
         await db.scalars(
-            select(Job).where(Job.status == JobStatus.scheduled, Job.depends_on.is_not(None))
+            select(Job).where(
+                Job.status == JobStatus.scheduled,
+                Job.depends_on.is_not(None),
+                func.array_length(Job.depends_on, 1) > 0,
+            )
         )
     ).all()
+    if not pending:
+        return 0
+
+    # one query for every prerequisite of every pending job, instead of one
+    # query per pending job
+    all_dep_ids = {dep_id for job in pending for dep_id in job.depends_on}
+    status_by_id = dict(
+        (await db.execute(select(Job.id, Job.status).where(Job.id.in_(all_dep_ids)))).all()
+    )
 
     count = 0
     for job in pending:
-        if not job.depends_on:
-            continue
+        wanted = set(job.depends_on)
+        dep_statuses = [status_by_id[d] for d in wanted if d in status_by_id]
 
-        dep_statuses = (
-            await db.execute(select(Job.status).where(Job.id.in_(job.depends_on)))
-        ).scalars().all()
-
-        if len(dep_statuses) < len(set(job.depends_on)):
+        if len(dep_statuses) < len(wanted):
             # a referenced job no longer exists (e.g. its queue was deleted);
             # leave the dependent gated rather than guessing at intent.
             continue
@@ -159,30 +198,73 @@ async def resolve_dependencies(db: AsyncSession) -> int:
     return count
 
 
+async def _try_lock(db: AsyncSession, key: int) -> bool:
+    return bool(await db.scalar(text("SELECT pg_try_advisory_xact_lock(:k)"), {"k": key}))
+
+
 async def tick(db: AsyncSession) -> dict[str, int]:
+    if not await _try_lock(db, SCHEDULER_LOCK_KEY):
+        await db.rollback()
+        obs.SCHED_LEADER.set(0)
+        return {"promoted": 0, "spawned": 0, "deps_resolved": 0}
+    obs.SCHED_LEADER.set(1)
+
     promoted = await promote_due_jobs(db)
     spawned = await promote_cron_jobs(db)
     deps_resolved = await resolve_dependencies(db)
     if promoted or spawned or deps_resolved:
         await notify_jobs_available(db)
     await db.commit()
+
+    obs.SCHED_PROMOTED.labels("due").inc(promoted)
+    obs.SCHED_PROMOTED.labels("cron").inc(spawned)
+    obs.SCHED_PROMOTED.labels("dependencies").inc(deps_resolved)
     return {"promoted": promoted, "spawned": spawned, "deps_resolved": deps_resolved}
+
+
+async def prune_telemetry(
+    db: AsyncSession, heartbeat_retention_hours: int, dead_worker_retention_hours: int
+) -> dict[str, int]:
+    """worker_heartbeats gets a row per worker every few seconds and every
+    worker restart registers a new workers row — without pruning, both grow
+    forever. Jobs/executions reference workers with ON DELETE SET NULL, so
+    deleting long-dead workers never loses job history."""
+    now = datetime.now(timezone.utc)
+    heartbeats = await db.execute(
+        delete(WorkerHeartbeat).where(
+            WorkerHeartbeat.ts < now - timedelta(hours=heartbeat_retention_hours)
+        )
+    )
+    workers = await db.execute(
+        delete(Worker).where(
+            Worker.status == WorkerStatus.dead,
+            Worker.last_heartbeat_at < now - timedelta(hours=dead_worker_retention_hours),
+        )
+    )
+    return {
+        "heartbeats_pruned": heartbeats.rowcount or 0,
+        "workers_pruned": workers.rowcount or 0,
+    }
 
 
 async def run_forever() -> None:
     settings = get_settings()
     logger.info("scheduler started", extra={"extra_fields": {"tick_sec": settings.sched_tick_sec}})
+    loop = asyncio.get_running_loop()
 
     while True:
+        started = loop.time()
         try:
             async with AsyncSessionLocal() as db:
-                stats = await tick(db)
+                with obs.SCHED_TICK_SECONDS.time():
+                    stats = await tick(db)
                 if any(stats.values()):
                     logger.info("scheduler tick", extra={"extra_fields": stats})
         except Exception:
             logger.exception("scheduler tick failed")
 
-        await asyncio.sleep(settings.sched_tick_sec)
+        # keep a steady cadence regardless of how long the tick took
+        await asyncio.sleep(max(settings.sched_tick_sec - (loop.time() - started), 0.05))
 
 
 async def run_reaper_forever() -> None:
@@ -192,24 +274,45 @@ async def run_reaper_forever() -> None:
         extra={"extra_fields": {"tick_sec": settings.reaper_tick_sec,
                                  "visibility_timeout_sec": settings.visibility_timeout_sec}},
     )
+    # pruning is cheap but pointless every few seconds — about once a minute
+    prune_every = max(60 // max(settings.reaper_tick_sec, 1), 1)
 
+    ticks = 0
     while True:
         try:
             async with AsyncSessionLocal() as db:
-                stats = await reaper.reap_dead_workers(db, settings.visibility_timeout_sec)
-                if stats["jobs_requeued"]:
-                    await notify_jobs_available(db)
-                await db.commit()
-                if stats["workers_reaped"]:
-                    logger.info("reaper swept dead workers", extra={"extra_fields": stats})
+                if await _try_lock(db, REAPER_LOCK_KEY):
+                    stats = await reaper.reap_dead_workers(db, settings.visibility_timeout_sec)
+                    if stats["jobs_requeued"]:
+                        await notify_jobs_available(db)
+                    if ticks % prune_every == 0:
+                        stats.update(
+                            await prune_telemetry(
+                                db,
+                                settings.heartbeat_retention_hours,
+                                settings.dead_worker_retention_hours,
+                            )
+                        )
+                    await db.commit()
+
+                    obs.REAPER_WORKERS_REAPED.inc(stats["workers_reaped"])
+                    obs.REAPER_JOBS_RECOVERED.labels("requeued").inc(stats["jobs_requeued"])
+                    obs.REAPER_JOBS_RECOVERED.labels("dead").inc(stats["jobs_dead"])
+                    if stats["workers_reaped"] or stats["jobs_requeued"] or stats["jobs_dead"]:
+                        logger.info("reaper swept dead workers", extra={"extra_fields": stats})
+                else:
+                    await db.rollback()
         except Exception:
             logger.exception("reaper tick failed")
 
+        ticks += 1
         await asyncio.sleep(settings.reaper_tick_sec)
 
 
 async def main() -> None:
     configure_logging()
+    settings = get_settings()
+    obs.start_metrics_server(settings.scheduler_metrics_port)
     await asyncio.gather(run_forever(), run_reaper_forever())
 
 

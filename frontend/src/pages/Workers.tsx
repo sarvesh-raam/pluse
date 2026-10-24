@@ -1,14 +1,19 @@
-import { useQuery } from "@tanstack/react-query"
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import { toast } from "sonner"
+import { Skull } from "lucide-react"
 import { useAuthStore } from "@/lib/auth-store"
-import { workersApi } from "@/lib/api"
+import { ApiError, chaosApi, workersApi } from "@/lib/api"
 import { formatRelative, isFreshHeartbeat } from "@/lib/format"
 import { PageHeader } from "@/components/shared/PageHeader"
 
 import { EmptyState } from "@/components/shared/EmptyState"
+import { ChaosPanel } from "@/components/shared/ChaosPanel"
 import { UtilizationChart } from "@/components/charts/UtilizationChart"
+import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 
-function WorkerCard({ workerId }: { workerId: string }) {
+function WorkerCard({ workerId, projectId }: { workerId: string; projectId: string }) {
+  const queryClient = useQueryClient()
   const { data: worker } = useQuery({
     queryKey: ["worker", workerId],
     queryFn: () => workersApi.get(workerId),
@@ -20,9 +25,20 @@ function WorkerCard({ workerId }: { workerId: string }) {
     refetchInterval: 4000,
   })
 
+  const killMutation = useMutation({
+    mutationFn: () => chaosApi.kill(projectId, workerId),
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ["worker", workerId] })
+      queryClient.invalidateQueries({ queryKey: ["chaosStatus", projectId] })
+      toast.warning(`Killed ${result.worker_name}`, { description: result.detail })
+    },
+    onError: (err) => toast.error(err instanceof ApiError ? err.message : "Chaos kill failed"),
+  })
+
   if (!worker) return null
   const fresh = isFreshHeartbeat(worker.last_heartbeat_at)
   const runningNow = heartbeats?.[heartbeats.length - 1]?.running_jobs ?? 0
+  const killable = fresh && worker.status !== "dead" && worker.status !== "draining" && !worker.chaos_kill_requested_at
 
   return (
     <div className="relative rounded-[var(--radius)] border border-border bg-surface p-5">
@@ -37,7 +53,22 @@ function WorkerCard({ workerId }: { workerId: string }) {
             className={cn("h-2 w-2 rounded-full", fresh ? "bg-success pulse-dot" : "bg-danger")}
             title={fresh ? "Heartbeat fresh" : "Heartbeat stale"}
           />
-          <span className="text-xs capitalize text-muted-foreground">{worker.status}</span>
+          <span className="text-xs capitalize text-muted-foreground">
+            {worker.chaos_kill_requested_at && worker.status !== "dead" ? "killed…" : worker.status}
+          </span>
+          {killable && (
+            <Button
+              size="icon"
+              variant="ghost"
+              className="ml-1 h-6 w-6 text-danger hover:text-danger"
+              title="Chaos: kill this worker"
+              aria-label={`Kill ${worker.name}`}
+              disabled={killMutation.isPending}
+              onClick={() => killMutation.mutate()}
+            >
+              <Skull className="h-3.5 w-3.5" />
+            </Button>
+          )}
         </div>
       </div>
 
@@ -86,10 +117,12 @@ export function Workers() {
         description="Heartbeat freshness, running jobs, and subscribed queues."
       />
 
+      <ChaosPanel className="mb-6" />
+
       {workers?.items.length ? (
         <div data-tour="worker-cards" className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {workers.items.map((w) => (
-            <WorkerCard key={w.id} workerId={w.id} />
+            <WorkerCard key={w.id} workerId={w.id} projectId={projectId} />
           ))}
         </div>
       ) : (

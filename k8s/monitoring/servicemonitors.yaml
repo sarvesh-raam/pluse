@@ -1,0 +1,29 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: pulse-api
+  labels: {release: kube-prometheus-stack}
+spec:
+  selector: {matchLabels: {app: pulse-api}}
+  endpoints:
+    - {port: http, path: /metrics, interval: 15s}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: pulse-scheduler
+  labels: {release: kube-prometheus-stack}
+spec:
+  selector: {matchLabels: {app: pulse-scheduler}}
+  endpoints:
+    - {port: metrics, interval: 15s}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: pulse-worker
+  labels: {release: kube-prometheus-stack}
+spec:
+  selector: {matchLabels: {app: pulse-worker}}
+  endpoints:
+    - {port: metrics, interval: 15s}

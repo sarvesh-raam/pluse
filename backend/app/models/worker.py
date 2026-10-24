@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String, func, Float
+from sqlalchemy import DateTime, Enum, Float, ForeignKey, Integer, String, func
 from sqlalchemy.dialects.postgresql import ARRAY, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -33,8 +33,13 @@ class Worker(Base):
     )
     cpu_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
     ram_mb: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # set by POST /chaos/kill in "signal" mode; the worker crashes itself
+    # when it sees this (immediately via NOTIFY, else on its next heartbeat)
+    chaos_kill_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     project: Mapped["Project"] = relationship(back_populates="workers")
     heartbeats: Mapped[list["WorkerHeartbeat"]] = relationship(
-        back_populates="worker", cascade="all, delete-orphan"
+        back_populates="worker", cascade="all, delete-orphan", passive_deletes=True
     )

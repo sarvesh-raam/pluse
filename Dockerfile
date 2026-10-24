@@ -7,7 +7,7 @@
 FROM node:22-slim AS frontend-build
 WORKDIR /app/frontend
 COPY frontend/package.json frontend/package-lock.json* ./
-RUN npm install
+RUN npm ci --no-audit --no-fund
 COPY frontend/ .
 RUN npm run build
 
@@ -15,11 +15,15 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+# Worker/scheduler metrics ports are off here: a Space exposes one port only.
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    WORKER_METRICS_PORT=0 \
+    SCHEDULER_METRICS_PORT=0
 
+# asyncpg/psutil ship wheels — no compiler or libpq headers needed
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential libpq-dev curl nginx supervisor \
+    curl nginx supervisor \
     && rm -rf /var/lib/apt/lists/*
 
 # Hugging Face Spaces runs as user 1000. Create user and directories.
@@ -32,7 +36,8 @@ COPY backend/app ./backend/app
 COPY backend/alembic ./backend/alembic
 COPY backend/alembic.ini ./backend/alembic.ini
 
-RUN pip install --no-cache-dir -e "./backend[dev]"
+# runtime deps only — test/lint tooling stays out of the deployed image
+RUN pip install --no-cache-dir ./backend
 
 COPY --from=frontend-build /app/frontend/dist /usr/share/nginx/html
 

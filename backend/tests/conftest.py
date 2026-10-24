@@ -1,3 +1,4 @@
+import os
 import uuid
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
@@ -17,9 +18,13 @@ from app.models.organization import Organization
 from app.models.project import Project
 from app.models.queue import Queue
 
-ADMIN_DSN = "postgresql://pulse:pulse@localhost:5432/postgres"
+# Override with TEST_PG_HOST / TEST_PG_PORT (e.g. CI service containers, or
+# a Postgres on a non-default port). The suite only ever touches its own
+# pulse_test database on that server.
+_PG = f"pulse:pulse@{os.environ.get('TEST_PG_HOST', 'localhost')}:{os.environ.get('TEST_PG_PORT', '5432')}"
+ADMIN_DSN = f"postgresql://{_PG}/postgres"
 TEST_DB_NAME = "pulse_test"
-TEST_DATABASE_URL = f"postgresql+asyncpg://pulse:pulse@localhost:5432/{TEST_DB_NAME}"
+TEST_DATABASE_URL = f"postgresql+asyncpg://{_PG}/{TEST_DB_NAME}"
 
 
 async def _ensure_test_database() -> None:

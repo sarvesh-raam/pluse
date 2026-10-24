@@ -11,7 +11,10 @@ from app.models.enums import ExecutionStatus
 
 class JobExecution(Base):
     __tablename__ = "job_executions"
-    __table_args__ = (Index("idx_exec_job", "job_id", "attempt_number"),)
+    __table_args__ = (
+        Index("idx_exec_job", "job_id", "attempt_number"),
+        Index("idx_exec_finished_at", "finished_at"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
@@ -35,5 +38,5 @@ class JobExecution(Base):
 
     job: Mapped["Job"] = relationship(back_populates="executions")
     logs: Mapped[list["JobLog"]] = relationship(
-        back_populates="execution", cascade="all, delete-orphan"
+        back_populates="execution", cascade="all, delete-orphan", passive_deletes=True
     )

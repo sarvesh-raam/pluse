@@ -1,5 +1,6 @@
 import time
 import uuid
+from collections import deque
 
 
 class TokenBucket:
@@ -45,3 +46,44 @@ class RateLimiterRegistry:
 
 
 registry = RateLimiterRegistry()
+
+
+class FailureLimiter:
+    """Sliding-window limit on *failed* attempts per key (used for login:
+    key = client IP + email). In-memory per API process — with N replicas an
+    attacker gets N x the budget, which still turns an unbounded online
+    password-guessing attack into a handful of tries per window."""
+
+    def __init__(self, max_failures: int, window_sec: float, max_keys: int = 50_000):
+        self.max_failures = max_failures
+        self.window_sec = window_sec
+        self.max_keys = max_keys
+        self._failures: dict[str, deque[float]] = {}
+
+    def _prune(self, key: str, now: float) -> deque[float]:
+        q = self._failures.get(key)
+        if q is None:
+            return deque()
+        while q and now - q[0] > self.window_sec:
+            q.popleft()
+        if not q:
+            del self._failures[key]
+        return q
+
+    def is_blocked(self, key: str) -> bool:
+        return len(self._prune(key, time.monotonic())) >= self.max_failures
+
+    def record_failure(self, key: str) -> None:
+        now = time.monotonic()
+        if len(self._failures) >= self.max_keys:
+            # bounded memory: drop the oldest-inserted key
+            self._failures.pop(next(iter(self._failures)))
+        q = self._prune(key, now)
+        q.append(now)
+        self._failures[key] = q
+
+    def reset(self, key: str) -> None:
+        self._failures.pop(key, None)
+
+
+login_limiter = FailureLimiter(max_failures=10, window_sec=300)

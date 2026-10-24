@@ -45,10 +45,13 @@ async def replay_dlq_entry(
     entry = await db.get(DeadLetterEntry, dlq_id)
     if entry is None:
         raise NotFoundError("Dead letter entry not found")
+    # authorize before revealing anything about the entry's state
+    await get_queue_scoped(db, entry.queue_id, user, MemberRole.member)
+
+    # lock the entry so two concurrent replays can't both pass the check
+    await db.refresh(entry, with_for_update=True)
     if entry.replayed_at is not None:
         raise ConflictError("This dead letter entry has already been replayed")
-
-    await get_queue_scoped(db, entry.queue_id, user, MemberRole.member)
 
     job = await replay_from_dlq(db, entry)
     await notify_jobs_available(db)

@@ -5,6 +5,7 @@ from fastapi import FastAPI, Request, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import IntegrityError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 logger = logging.getLogger("pulse")
@@ -40,6 +41,11 @@ class UnauthorizedError(AppError):
 class ForbiddenError(AppError):
     status_code = status.HTTP_403_FORBIDDEN
     code = "forbidden"
+
+
+class TooManyRequestsError(AppError):
+    status_code = status.HTTP_429_TOO_MANY_REQUESTS
+    code = "rate_limited"
 
 
 class UnprocessableError(AppError):
@@ -79,6 +85,17 @@ def register_exception_handlers(app: FastAPI) -> None:
         return JSONResponse(
             status_code=exc.status_code,
             content=_envelope("http_error", str(exc.detail)),
+        )
+
+    @app.exception_handler(IntegrityError)
+    async def integrity_error_handler(request: Request, exc: IntegrityError) -> JSONResponse:
+        # Check-then-insert endpoints (register, create org/project/queue)
+        # can still lose a race to a concurrent request; the unique
+        # constraint is the real guard, so surface it as a 409, not a 500.
+        logger.info("integrity error", extra={"extra_fields": {"path": request.url.path}})
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content=_envelope("conflict", "The request conflicts with existing data"),
         )
 
     @app.exception_handler(Exception)

@@ -32,10 +32,10 @@ class Queue(Base):
 
     project: Mapped["Project"] = relationship(back_populates="queues")
     retry_policy: Mapped["RetryPolicy | None"] = relationship(back_populates="queues")
-    jobs: Mapped[list["Job"]] = relationship(back_populates="queue", cascade="all, delete-orphan")
+    jobs: Mapped[list["Job"]] = relationship(back_populates="queue", cascade="all, delete-orphan", passive_deletes=True)
     scheduled_jobs: Mapped[list["ScheduledJob"]] = relationship(
-        back_populates="queue", cascade="all, delete-orphan"
+        back_populates="queue", cascade="all, delete-orphan", passive_deletes=True
     )
     dlq_entries: Mapped[list["DeadLetterEntry"]] = relationship(
-        back_populates="queue", cascade="all, delete-orphan"
+        back_populates="queue", cascade="all, delete-orphan", passive_deletes=True
     )

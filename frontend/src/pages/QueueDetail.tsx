@@ -33,10 +33,11 @@ export function QueueDetail() {
   const [priority, setPriority] = useState<string | null>(null)
 
   const updateMutation = useMutation({
+    // an emptied input means "unchanged", not 0 (which the API rejects)
     mutationFn: () =>
       queuesApi.update(queueId!, {
-        concurrency_limit: concurrency !== null ? Number(concurrency) : undefined,
-        priority_default: priority !== null ? Number(priority) : undefined,
+        concurrency_limit: concurrency ? Number(concurrency) : undefined,
+        priority_default: priority ? Number(priority) : undefined,
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["queue", queueId] })
@@ -50,8 +51,10 @@ export function QueueDetail() {
     mutationFn: () => (queue?.is_paused ? queuesApi.resume(queueId!) : queuesApi.pause(queueId!)),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["queue", queueId] })
+      queryClient.invalidateQueries({ queryKey: ["queues"] })
       toast.success(queue?.is_paused ? "Queue resumed" : "Queue paused")
     },
+    onError: (err) => toast.error(err instanceof ApiError ? err.message : "Failed to update queue"),
   })
 
   if (isLoading || !queue) return <Skeleton className="h-64 w-full" />
@@ -65,7 +68,12 @@ export function QueueDetail() {
         actions={
           <div className="flex items-center gap-2">
             <span className="text-sm text-muted-foreground">Active</span>
-            <Switch checked={!queue.is_paused} onCheckedChange={() => toggleMutation.mutate()} />
+            <Switch
+              checked={!queue.is_paused}
+              onCheckedChange={() => toggleMutation.mutate()}
+              disabled={toggleMutation.isPending}
+              aria-label="Toggle queue active"
+            />
           </div>
         }
       />

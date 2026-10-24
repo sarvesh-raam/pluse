@@ -9,8 +9,25 @@ routes actually registered in the running app (see the mapping table in
 the original spec listing 1:1).
 
 **Auth:** every route except `/auth/register`, `/auth/login`, `/auth/refresh`,
-and `/health` requires `Authorization: Bearer <access_token>`. Missing/invalid
-token → `401`. Insufficient role for the action → `403`.
+and the probe/metrics routes below requires `Authorization: Bearer <access_token>`.
+Missing/invalid token → `401`. Insufficient role for the action → `403`.
+An action that's invalid for the resource's current state (cancelling a
+running job, replaying an already-replayed DLQ entry) → `409`. A request that
+loses a uniqueness race to a concurrent one → `409`. Ten failed logins for the
+same email from the same client within 5 minutes → `429`.
+
+**Probes & metrics** (no prefix, no auth; not proxied by the frontend's nginx):
+
+| Path | Purpose |
+|---|---|
+| `GET /healthz` (alias `/health`) | liveness — process is up; deliberately does not touch the DB |
+| `GET /readyz` | readiness — `200` if Postgres answers `SELECT 1`, else `503` |
+| `GET /metrics` | Prometheus exposition: HTTP traffic by route template, plus fleet gauges (`pulse_jobs`, `pulse_workers`, `pulse_dlq_pending`, `pulse_queue_paused`) read from Postgres at most every 5s |
+
+The worker and scheduler expose their own `/metrics` on `WORKER_METRICS_PORT`
+(9100) and `SCHEDULER_METRICS_PORT` (9101): `pulse_worker_jobs_total`,
+`pulse_worker_job_duration_seconds`, `pulse_scheduler_is_leader`,
+`pulse_reaper_jobs_recovered_total`, and more — see `app/core/observability.py`.
 
 **Errors:** every error response is `{"error": {"code", "message", "details"}}`.
 Validation errors (`422`) put the Pydantic error list in `details`.
@@ -87,9 +104,11 @@ and the retry engine both need somewhere to define reusable policies (spec
 | GET | `/jobs/batch/{batch_id}` | viewer | aggregate progress: `{total, by_status}` |
 | POST | `/jobs/schedule` | member | `{queue_id, cron_expr, timezone?, handler, payload?}` → creates a `scheduled_jobs` template; croniter computes `next_run_at` immediately |
 | GET | `/jobs/schedule?queue_id=` | viewer | list a queue's cron templates |
+| PATCH | `/jobs/schedule/{id}` | member | `{is_active}` — pause/resume; resuming recomputes `next_run_at` from now |
+| DELETE | `/jobs/schedule/{id}` | member | already-spawned jobs keep running (their `scheduled_job_id` is nulled) |
 | GET | `/jobs/{id}` | viewer | |
-| POST | `/jobs/{id}/retry` | member | only from `failed`/`dead`; resets `attempts` to 0 |
-| POST | `/jobs/{id}/cancel` | member | only from `scheduled`/`queued`/`retrying` |
+| POST | `/jobs/{id}/retry` | member | only from `failed`/`dead` (else `409`); resets `attempts` to 0 and marks the job's pending DLQ entry replayed |
+| POST | `/jobs/{id}/cancel` | member | only from `scheduled`/`queued`/`retrying` (else `409`); row-locked so it can't race a worker's claim |
 | GET | `/jobs/{id}/executions` | viewer | full attempt history, oldest first |
 | GET | `/jobs/{id}/logs` | viewer | paginated, oldest first |
 
@@ -110,14 +129,21 @@ wrote (see design-decisions.md).
 | Method | Path | Min role | Notes |
 |---|---|---|---|
 | GET | `/dlq?queue_id=` | viewer | |
-| POST | `/dlq/{id}/replay` | member | resets the original job to `queued`/`attempts=0`; `409` if already replayed |
+| POST | `/dlq/{id}/replay` | member | resets the original job to `queued`/`attempts=0`; `409` if already replayed or the job is no longer `dead` |
+
+## Chaos engineering
+
+| Method | Path | Min role | Notes |
+|---|---|---|---|
+| GET | `/chaos/status?project_id=` | viewer | `{enabled, mode, live_workers}` — mode is `kubernetes` (pod delete) or `signal` (process kill) |
+| POST | `/chaos/kill` | admin | `{project_id, worker_id?}` — hard-kills that worker (or a random live one). `403` if `CHAOS_ENABLED=false`, `422` if no live workers |
 
 ## Metrics
 
 | Method | Path | Min role | Notes |
 |---|---|---|---|
-| GET | `/metrics/overview?project_id=` | viewer | throughput/min (5m avg), success_rate (1h), active_workers, queue_depth_total |
-| GET | `/metrics/throughput?project_id=&window=` | viewer | `window` e.g. `30m`/`1h`/`24h`/`7d`; bucket size auto-scales (minute/hour/day) |
+| GET | `/metrics/overview?project_id=` | viewer | throughput/min (5m avg), success_rate (1h), active_workers (alive: active or idle with a fresh heartbeat), queue_depth_total |
+| GET | `/metrics/throughput?project_id=&window=` | viewer | `window` e.g. `30m`/`1h`/`24h`/`7d` (1m–90d); bucket size auto-scales (minute/hour/day) |
 | GET | `/metrics/queues?project_id=` | viewer | per-queue depth/running/success_rate/avg_duration_ms |
 
 ## WebSocket

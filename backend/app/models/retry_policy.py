@@ -27,4 +27,4 @@ class RetryPolicy(Base):
     jitter_pct: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
 
     project: Mapped["Project"] = relationship(back_populates="retry_policies")
-    queues: Mapped[list["Queue"]] = relationship(back_populates="retry_policy")
+    queues: Mapped[list["Queue"]] = relationship(back_populates="retry_policy", passive_deletes=True)

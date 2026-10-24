@@ -29,4 +29,6 @@ class ScheduledJob(Base):
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     queue: Mapped["Queue"] = relationship(back_populates="scheduled_jobs")
-    spawned_jobs: Mapped[list["Job"]] = relationship(back_populates="scheduled_job")
+    spawned_jobs: Mapped[list["Job"]] = relationship(
+        back_populates="scheduled_job", passive_deletes=True
+    )

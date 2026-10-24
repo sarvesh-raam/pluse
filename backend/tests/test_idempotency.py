@@ -4,7 +4,7 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.enums import MemberRole
-from tests.conftest import auth_headers, login, make_org_project_queue, registered_user
+from tests.conftest import auth_headers, login, make_org_project_queue
 
 
 async def test_duplicate_idempotency_key_returns_same_job(

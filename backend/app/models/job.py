@@ -8,7 +8,6 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
-    UniqueConstraint,
     func,
     text,
 )
@@ -37,6 +36,11 @@ class Job(Base):
         ),
         Index("idx_jobs_status", "status"),
         Index("idx_jobs_batch", "batch_id"),
+        Index(
+            "idx_jobs_worker_inflight", "worker_id",
+            postgresql_where=text("status IN ('claimed', 'running')"),
+        ),
+        Index("idx_jobs_updated_at", "updated_at"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -79,9 +83,9 @@ class Job(Base):
     queue: Mapped["Queue"] = relationship(back_populates="jobs")
     scheduled_job: Mapped["ScheduledJob | None"] = relationship(back_populates="spawned_jobs")
     executions: Mapped[list["JobExecution"]] = relationship(
-        back_populates="job", cascade="all, delete-orphan"
+        back_populates="job", cascade="all, delete-orphan", passive_deletes=True
     )
-    logs: Mapped[list["JobLog"]] = relationship(back_populates="job", cascade="all, delete-orphan")
+    logs: Mapped[list["JobLog"]] = relationship(back_populates="job", cascade="all, delete-orphan", passive_deletes=True)
     dlq_entries: Mapped[list["DeadLetterEntry"]] = relationship(
-        back_populates="job", cascade="all, delete-orphan"
+        back_populates="job", cascade="all, delete-orphan", passive_deletes=True
     )

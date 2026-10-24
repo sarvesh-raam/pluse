@@ -1,0 +1,11 @@
+# Optional: for clusters running the Prometheus Operator
+# (kube-prometheus-stack). Apply after the base:
+#   kubectl apply -k k8s/monitoring
+# Without the operator, Prometheus picks the pods up through the
+# prometheus.io/* annotations set in k8s/base instead.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: pulse
+resources:
+  - servicemonitors.yaml
+  - prometheusrule.yaml

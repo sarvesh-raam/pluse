@@ -11,7 +11,12 @@ from app.config import get_settings
 
 settings = get_settings()
 
-engine = create_async_engine(settings.async_database_url, pool_pre_ping=True)
+engine = create_async_engine(
+    settings.async_database_url,
+    pool_pre_ping=True,
+    pool_size=settings.db_pool_size,
+    max_overflow=settings.db_max_overflow,
+)
 
 AsyncSessionLocal = async_sessionmaker(
     bind=engine, class_=AsyncSession, expire_on_commit=False

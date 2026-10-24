@@ -1,4 +1,4 @@
-import { useEffect, type ReactNode } from "react"
+import { lazy, Suspense, useEffect, type ComponentType, type ReactNode } from "react"
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { Toaster } from "@/components/ui/sonner"
@@ -6,18 +6,25 @@ import { TooltipProvider } from "@/components/ui/tooltip"
 import { useAuthStore } from "@/lib/auth-store"
 import { useThemeStore, initThemeListener } from "@/lib/theme-store"
 import { AppShell } from "@/components/layout/AppShell"
-import { Landing } from "@/pages/Landing"
-import { Login } from "@/pages/Login"
-import { Register } from "@/pages/Register"
-import { Onboarding } from "@/pages/Onboarding"
-import { Dashboard } from "@/pages/Dashboard"
-import { Queues } from "@/pages/Queues"
-import { QueueDetail } from "@/pages/QueueDetail"
-import { Jobs } from "@/pages/Jobs"
-import { JobDetail } from "@/pages/JobDetail"
-import { Workers } from "@/pages/Workers"
-import { Dlq } from "@/pages/Dlq"
-import { Settings } from "@/pages/Settings"
+import { Skeleton } from "@/components/ui/skeleton"
+
+// Route-level code splitting: the landing/login pages no longer pull in
+// Recharts and every app page (the single bundle was ~1 MB).
+const page = <K extends string>(load: () => Promise<Record<K, ComponentType>>, name: K) =>
+  lazy(() => load().then((m) => ({ default: m[name] })))
+
+const Landing = page(() => import("@/pages/Landing"), "Landing")
+const Login = page(() => import("@/pages/Login"), "Login")
+const Register = page(() => import("@/pages/Register"), "Register")
+const Onboarding = page(() => import("@/pages/Onboarding"), "Onboarding")
+const Dashboard = page(() => import("@/pages/Dashboard"), "Dashboard")
+const Queues = page(() => import("@/pages/Queues"), "Queues")
+const QueueDetail = page(() => import("@/pages/QueueDetail"), "QueueDetail")
+const Jobs = page(() => import("@/pages/Jobs"), "Jobs")
+const JobDetail = page(() => import("@/pages/JobDetail"), "JobDetail")
+const Workers = page(() => import("@/pages/Workers"), "Workers")
+const Dlq = page(() => import("@/pages/Dlq"), "Dlq")
+const Settings = page(() => import("@/pages/Settings"), "Settings")
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -52,6 +59,7 @@ export default function App() {
     <QueryClientProvider client={queryClient}>
       <TooltipProvider delay={200}>
         <BrowserRouter>
+          <Suspense fallback={<Skeleton className="m-6 h-64" />}>
           <Routes>
             <Route path="/" element={<Landing />} />
             <Route path="/login" element={<Login />} />
@@ -77,6 +85,7 @@ export default function App() {
             </Route>
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
+          </Suspense>
         </BrowserRouter>
         <Toaster theme={resolvedTheme} position="top-right" />
       </TooltipProvider>

@@ -10,7 +10,10 @@ from app.db import Base
 
 class WorkerHeartbeat(Base):
     __tablename__ = "worker_heartbeats"
-    __table_args__ = (Index("idx_heartbeats_worker_ts", "worker_id", "ts", postgresql_ops={"ts": "DESC"}),)
+    __table_args__ = (
+        Index("idx_heartbeats_worker_ts", "worker_id", "ts", postgresql_ops={"ts": "DESC"}),
+        Index("idx_heartbeats_ts", "ts"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()

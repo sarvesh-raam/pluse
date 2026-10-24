@@ -1,6 +1,6 @@
 import uuid
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -57,7 +57,7 @@ async def get_worker(
 @router.get("/{worker_id}/heartbeats", response_model=list[WorkerHeartbeatOut])
 async def worker_heartbeats(
     worker_id: uuid.UUID,
-    limit: int = 60,
+    limit: int = Query(60, ge=1, le=1000),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[WorkerHeartbeat]:

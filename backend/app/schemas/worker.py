@@ -20,6 +20,7 @@ class WorkerOut(BaseModel):
     last_heartbeat_at: datetime | None
     cpu_percent: float | None = None
     ram_mb: float | None = None
+    chaos_kill_requested_at: datetime | None = None
 
 
 class WorkerHeartbeatOut(BaseModel):

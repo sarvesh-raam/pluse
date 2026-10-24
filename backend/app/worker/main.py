@@ -1,18 +1,23 @@
 import asyncio
 import logging
+import os
 import signal
 import socket
+import sys
 import uuid
-import psutil
 from datetime import datetime, timezone
+from pathlib import Path
 
 import asyncpg
-from sqlalchemy import select, text
+import psutil
+from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from app.config import get_settings
+from app.core import observability as obs
 from app.core.logging import configure_logging
 from app.core.notify import CHANNEL as NOTIFY_CHANNEL
+from app.core.notify import CHAOS_CHANNEL
 from app.db import AsyncSessionLocal
 from app.engine import ai_summary, claim, retry
 from app.models.enums import ExecutionStatus, JobStatus, LogLevel, WorkerStatus
@@ -28,6 +33,10 @@ from app.worker.runtime import WorkerRuntime
 
 logger = logging.getLogger("pulse.worker")
 
+# Exit code of a process killed by SIGKILL (128 + 9) — what a chaos kill
+# should look like to the supervisor (docker / kubelet / supervisord).
+CHAOS_EXIT_CODE = 137
+
 
 class WorkerProcess:
     def __init__(self, project_slug: str, queue_names: list[str], concurrency: int):
@@ -40,6 +49,9 @@ class WorkerProcess:
         self.shutting_down = False
         self._wake_event = asyncio.Event()
         self._notify_conn: asyncpg.Connection | None = None
+        self._dsn: str | None = None
+        self._process = psutil.Process()
+        self._health_file = Path(get_settings().worker_health_file)
 
     async def _resolve_project(self, db) -> uuid.UUID:
         while True:
@@ -52,22 +64,22 @@ class WorkerProcess:
             await asyncio.sleep(2)
 
     async def _refresh_queue_ids(self, db) -> list[uuid.UUID]:
-        stmt = select(Queue.id, Queue.name).where(Queue.project_id == self.project_id)
+        stmt = select(Queue.id).where(Queue.project_id == self.project_id)
         if self.queue_names:
             stmt = stmt.where(Queue.name.in_(self.queue_names))
-        rows = (await db.execute(stmt)).all()
-        return [row.id for row in rows]
+        return list((await db.scalars(stmt)).all())
 
     async def register(self) -> None:
         async with AsyncSessionLocal() as db:
             self.project_id = await self._resolve_project(db)
             self.queue_ids = await self._refresh_queue_ids(db)
 
+            hostname = socket.gethostname()  # == pod name under Kubernetes
             worker = Worker(
                 project_id=self.project_id,
-                name=f"worker-{socket.gethostname()}-{uuid.uuid4().hex[:6]}",
-                hostname=socket.gethostname(),
-                status=WorkerStatus.active,
+                name=f"worker-{hostname}-{uuid.uuid4().hex[:6]}",
+                hostname=hostname,
+                status=WorkerStatus.idle,
                 queues=self.queue_names or ["*"],
                 concurrency=self.runtime.concurrency,
                 last_heartbeat_at=datetime.now(timezone.utc),
@@ -77,6 +89,9 @@ class WorkerProcess:
             await db.refresh(worker)
             self.worker_id = worker.id
 
+        obs.WORKER_CONCURRENCY.set(self.runtime.concurrency)
+        obs.WORKER_RUNNING.set_function(lambda: self.runtime.running_count)
+        self._touch_health_file()
         logger.info(
             "worker registered",
             extra={"extra_fields": {
@@ -86,60 +101,121 @@ class WorkerProcess:
             }},
         )
 
+    def _touch_health_file(self) -> None:
+        try:
+            self._health_file.touch()
+        except OSError:
+            pass
+
+    def _chaos_exit(self, reason: str) -> None:
+        """Simulate a hard crash: no draining, no status update, no cleanup.
+        In-flight jobs are left claimed/running for the reaper to recover
+        once this worker's heartbeat goes stale, and the process supervisor
+        (Kubernetes / docker restart policy / supervisord) brings up a
+        replacement — which is exactly the self-healing path being shown."""
+        logger.warning(
+            "chaos: killing worker process",
+            extra={"extra_fields": {"worker_id": str(self.worker_id), "reason": reason,
+                                     "in_flight": self.runtime.running_count}},
+        )
+        logging.shutdown()
+        os._exit(CHAOS_EXIT_CODE)
+
     async def heartbeat_loop(self, interval_sec: float) -> None:
-        # Trigger initial CPU measurement to avoid 0.0 on first iteration
-        psutil.cpu_percent(interval=None)
+        # Prime the CPU counter so the first reading isn't a meaningless 0.0
+        self._process.cpu_percent(interval=None)
         while not self.shutting_down:
             await asyncio.sleep(interval_sec)
             try:
-                async with AsyncSessionLocal() as db:
-                    self.queue_ids = await self._refresh_queue_ids(db)
-                    now = datetime.now(timezone.utc)
-                    worker = await db.get(Worker, self.worker_id)
-                    if worker is None:
-                        continue
-                    worker.last_heartbeat_at = now
-                    worker.queues = self.queue_names or ["*"]
-
-                    mem_mb = psutil.virtual_memory().used / (1024 * 1024)
-                    cpu_pct = psutil.cpu_percent(interval=None)
-
-                    worker.cpu_percent = cpu_pct
-                    worker.ram_mb = mem_mb
-
-                    db.add(
-                        WorkerHeartbeat(
-                            worker_id=self.worker_id,
-                            ts=now,
-                            running_jobs=self.runtime.running_count,
-                            cpu_percent=cpu_pct,
-                            ram_mb=mem_mb,
-                        )
-                    )
-                    await db.commit()
+                await self._heartbeat_once()
             except Exception:
                 logger.exception("heartbeat failed")
+            await self._ensure_notify_listener()
+
+    async def _heartbeat_once(self) -> None:
+        async with AsyncSessionLocal() as db:
+            self.queue_ids = await self._refresh_queue_ids(db)
+            now = datetime.now(timezone.utc)
+            worker = await db.get(Worker, self.worker_id)
+            if worker is None:
+                # Row pruned/deleted while we were alive (e.g. a long network
+                # partition) — re-register instead of heartbeating into nothing.
+                logger.warning("worker row missing — re-registering")
+                await self.register()
+                return
+
+            if worker.chaos_kill_requested_at is not None:
+                self._chaos_exit("kill flag set (heartbeat)")
+
+            # The reaper may have declared us dead during a stall (GC pause,
+            # DB blip) and requeued our jobs. We're evidently alive, so come
+            # back — otherwise every job we claim from now on would be stolen
+            # by the reaper's "jobs under a dead worker" sweep.
+            if worker.status == WorkerStatus.dead and not self.shutting_down:
+                logger.warning("worker was marked dead but is alive — reviving")
+            if not self.shutting_down:
+                worker.status = (
+                    WorkerStatus.active if self.runtime.running_count else WorkerStatus.idle
+                )
+
+            # Per-process figures, not host-wide: several workers on one host
+            # would otherwise each report (and the dashboard sum) the whole
+            # machine's memory.
+            cpu_pct = self._process.cpu_percent(interval=None)
+            mem_mb = self._process.memory_info().rss / (1024 * 1024)
+
+            worker.last_heartbeat_at = now
+            worker.queues = self.queue_names or ["*"]
+            worker.cpu_percent = cpu_pct
+            worker.ram_mb = mem_mb
+            db.add(
+                WorkerHeartbeat(
+                    worker_id=self.worker_id,
+                    ts=now,
+                    running_jobs=self.runtime.running_count,
+                    cpu_percent=cpu_pct,
+                    ram_mb=mem_mb,
+                )
+            )
+            await db.commit()
+        self._touch_health_file()
 
     async def setup_notify_listener(self, database_url: str) -> None:
         """§10 bonus: event-driven execution. LISTEN on the channel the API/
         scheduler NOTIFY on enqueue/promote/reap, so poll_loop wakes up
         immediately instead of waiting out its normal interval. Polling
         stays as the fallback — if this connection can't be established
-        (or drops), the worker still works correctly, just less promptly."""
-        dsn = database_url.replace("postgresql+asyncpg://", "postgresql://")
+        (or drops), the worker still works correctly, just less promptly,
+        and heartbeat_loop keeps trying to re-establish it."""
+        self._dsn = database_url.replace("postgresql+asyncpg://", "postgresql://")
+        await self._ensure_notify_listener()
+
+    async def _ensure_notify_listener(self) -> None:
+        if self._dsn is None or self.shutting_down:
+            return
+        if self._notify_conn is not None and not self._notify_conn.is_closed():
+            return
         try:
-            self._notify_conn = await asyncpg.connect(dsn)
-            await self._notify_conn.add_listener(NOTIFY_CHANNEL, self._on_notify)
+            conn = await asyncpg.connect(self._dsn)
+            await conn.add_listener(NOTIFY_CHANNEL, self._on_notify)
+            await conn.add_listener(CHAOS_CHANNEL, self._on_chaos)
+            self._notify_conn = conn
             logger.info("listening for %r notifications", NOTIFY_CHANNEL)
+            # anything enqueued while we weren't listening: poll right away
+            self._wake_event.set()
         except Exception:
-            logger.exception("LISTEN/NOTIFY setup failed — falling back to polling only")
+            logger.warning("LISTEN/NOTIFY setup failed — polling only until it reconnects")
             self._notify_conn = None
 
     def _on_notify(self, _connection, _pid, _channel, _payload) -> None:
         self._wake_event.set()
 
+    def _on_chaos(self, _connection, _pid, _channel, payload: str) -> None:
+        if payload == str(self.worker_id):
+            self._chaos_exit("kill notification")
+
     async def close_notify_listener(self) -> None:
-        if self._notify_conn is not None:
+        if self._notify_conn is not None and not self._notify_conn.is_closed():
             await self._notify_conn.close()
 
     async def poll_loop(self, interval_sec: float) -> None:
@@ -150,12 +226,14 @@ class WorkerProcess:
                 logger.exception("poll iteration failed")
             try:
                 await asyncio.wait_for(self._wake_event.wait(), timeout=interval_sec)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
             self._wake_event.clear()
 
     async def _poll_once(self) -> None:
         for queue_id in list(self.queue_ids):
+            if self.shutting_down:
+                return
             free = self.runtime.free_slots
             if free <= 0:
                 return
@@ -193,10 +271,15 @@ class WorkerProcess:
             )
             db.add(execution)
             await db.flush()
+            # Keep the id: (job_id, attempt_number) is NOT unique — a job
+            # reaped mid-run and re-claimed has another execution row with
+            # the same attempt number, so looking it up again by attempt
+            # could update the wrong (stale) row.
+            execution_id = execution.id
             db.add(
                 JobLog(
                     job_id=job.id,
-                    execution_id=execution.id,
+                    execution_id=execution_id,
                     ts=started_at,
                     level=LogLevel.info,
                     message=f"Running handler '{job.handler}' (attempt {attempt}/{job.max_attempts})",
@@ -209,7 +292,7 @@ class WorkerProcess:
         error_type: str | None = None
         error_message: str | None = None
         success = False
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         perf_start = loop.time()
         try:
             handler = HANDLERS.get(job.handler)
@@ -220,11 +303,14 @@ class WorkerProcess:
             success = True
         except Exception as exc:
             error_type = type(exc).__name__
-            error_message = str(exc)
-        duration_ms = int((loop.time() - perf_start) * 1000)
+            error_message = str(exc) or error_type
+        elapsed = loop.time() - perf_start
+        duration_ms = int(elapsed * 1000)
+
+        obs.JOB_DURATION.labels(job.handler).observe(elapsed)
+        obs.JOBS_EXECUTED.labels(job.handler, "success" if success else "failure").inc()
 
         result_status: JobStatus | None = None
-        execution_id: uuid.UUID | None = None
         recent_logs: list[str] = []
 
         async with AsyncSessionLocal() as db:
@@ -236,12 +322,7 @@ class WorkerProcess:
                 )
                 return
 
-            execution = await db.scalar(
-                select(JobExecution).where(
-                    JobExecution.job_id == job.id, JobExecution.attempt_number == attempt
-                )
-            )
-            execution_id = execution.id
+            execution = await db.get(JobExecution, execution_id)
             finished_at = datetime.now(timezone.utc)
 
             if success:
@@ -252,7 +333,7 @@ class WorkerProcess:
                 db.add(
                     JobLog(
                         job_id=job.id,
-                        execution_id=execution.id,
+                        execution_id=execution_id,
                         ts=finished_at,
                         level=LogLevel.info,
                         message=f"Completed successfully in {duration_ms}ms",
@@ -288,7 +369,7 @@ class WorkerProcess:
                 db.add(
                     JobLog(
                         job_id=job.id,
-                        execution_id=execution.id,
+                        execution_id=execution_id,
                         ts=finished_at,
                         level=LogLevel.error,
                         message=f"{error_type}: {error_message} (-> {result_status.value})",
@@ -310,7 +391,7 @@ class WorkerProcess:
         # a network round-trip to Groq that can take several seconds, and
         # this job is already in its terminal 'dead' state by this point, so
         # there's no contention to worry about holding up.
-        if result_status == JobStatus.dead and execution_id is not None:
+        if result_status == JobStatus.dead:
             summary = await ai_summary.summarize_failure(
                 job.handler, error_message or "unknown error", recent_logs
             )
@@ -344,9 +425,26 @@ class WorkerProcess:
         logger.info("shutdown complete")
 
 
+def _install_signal_handlers(loop: asyncio.AbstractEventLoop, stop_event: asyncio.Event) -> None:
+    if sys.platform == "win32":
+        # The Proactor loop has no add_signal_handler; signal.signal handlers
+        # run on the main thread between bytecodes, so hop back onto the loop
+        # thread-safely. Without this, Ctrl+C killed the worker without the
+        # graceful drain.
+        def handler(_signum, _frame):
+            loop.call_soon_threadsafe(stop_event.set)
+
+        signal.signal(signal.SIGINT, handler)
+        signal.signal(signal.SIGTERM, handler)
+    else:
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, stop_event.set)
+
+
 async def main() -> None:
     configure_logging()
     settings = get_settings()
+    obs.start_metrics_server(settings.worker_metrics_port)
 
     queue_names = [q.strip() for q in settings.worker_queues.split(",") if q.strip()]
     process = WorkerProcess(
@@ -358,14 +456,7 @@ async def main() -> None:
     await process.setup_notify_listener(settings.async_database_url)
 
     stop_event = asyncio.Event()
-    loop = asyncio.get_event_loop()
-    import sys
-    if sys.platform == "win32":
-        # Windows does not support add_signal_handler, so we'll rely on KeyboardInterrupt
-        pass
-    else:
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            loop.add_signal_handler(sig, stop_event.set)
+    _install_signal_handlers(asyncio.get_running_loop(), stop_event)
 
     poll_task = asyncio.create_task(process.poll_loop(settings.worker_poll_interval_sec))
     heartbeat_task = asyncio.create_task(process.heartbeat_loop(settings.heartbeat_sec))

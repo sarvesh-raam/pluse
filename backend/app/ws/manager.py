@@ -38,13 +38,16 @@ class ConnectionManager:
             return
         payload = json.dumps(message, default=str)
         dead: list[WebSocket] = []
-        for ws in conns:
+        # iterate a snapshot: send_text() awaits, and a concurrent connect()
+        # or disconnect() mutating the live set mid-loop raises
+        # "RuntimeError: Set changed size during iteration"
+        for ws in list(conns):
             try:
                 await ws.send_text(payload)
             except Exception:
                 dead.append(ws)
         for ws in dead:
-            conns.discard(ws)
+            self.disconnect(project_id, ws)
 
 
 manager = ConnectionManager()

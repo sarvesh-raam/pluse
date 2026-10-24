@@ -1,8 +1,9 @@
 import asyncio
 import random
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 import httpx
 
@@ -17,16 +18,24 @@ class JobContext:
 
 Handler = Callable[[dict[str, Any], JobContext], Awaitable[dict[str, Any]]]
 
+# Payloads are user-supplied. Bound the demo handlers so one bad payload
+# can't wedge a worker slot forever — compute runs in a thread, which can't
+# be cancelled once started.
+MAX_SLEEP_SEC = 3600.0
+MAX_FIB_N = 100_000
+
 
 async def sleep_handler(payload: dict[str, Any], ctx: JobContext) -> dict[str, Any]:
-    seconds = float(payload.get("seconds", 1))
+    seconds = min(max(float(payload.get("seconds", 1)), 0.0), MAX_SLEEP_SEC)
     await asyncio.sleep(seconds)
     return {"slept_seconds": seconds}
 
 
 async def http_call_handler(payload: dict[str, Any], ctx: JobContext) -> dict[str, Any]:
-    url = payload["url"]
-    timeout = float(payload.get("timeout_sec", 10))
+    url = str(payload["url"])
+    if not url.startswith(("http://", "https://")):
+        raise ValueError("url must be http:// or https://")
+    timeout = min(max(float(payload.get("timeout_sec", 10)), 0.1), 60.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
         response = await client.get(url)
         return {"status_code": response.status_code}
@@ -58,8 +67,12 @@ def _fibonacci(n: int) -> int:
 
 async def compute_handler(payload: dict[str, Any], ctx: JobContext) -> dict[str, Any]:
     n = int(payload.get("n", 30))
+    if not 0 <= n <= MAX_FIB_N:
+        raise ValueError(f"n must be between 0 and {MAX_FIB_N}")
     result = await asyncio.to_thread(_fibonacci, n)
-    return {"fib": result}
+    # fib(n) has ~0.2n digits; past a few thousand digits Python refuses to
+    # even str() it (int max_str_digits), so report its size instead
+    return {"fib": result} if n <= 1000 else {"fib_bits": result.bit_length()}
 
 
 HANDLERS: dict[str, Handler] = {

@@ -1,3 +1,13 @@
+x-backend: &backend
+  build:
+    context: ./backend
+  image: pulse-backend:local
+  restart: unless-stopped
+  env_file:
+    - .env
+  environment:
+    DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://pulse:pulse@postgres:5432/pulse}
+
 services:
   postgres:
     image: postgres:16
@@ -16,71 +26,70 @@ services:
       timeout: 5s
       retries: 10
 
-  api:
-    build:
-      context: ./backend
-    restart: unless-stopped
-    env_file:
-      - .env
-    environment:
-      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://pulse:pulse@postgres:5432/pulse}
+  # one-shot: schema migrations run once, before anything else starts —
+  # not inside the api command, where scaling the api would race migrations
+  migrate:
+    <<: *backend
+    restart: "no"
     depends_on:
       postgres:
         condition: service_healthy
+    command: alembic upgrade head
+
+  seed:
+    <<: *backend
+    restart: "no"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    command: python -m app.seed
+
+  api:
+    <<: *backend
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     ports:
       - "${API_PORT:-8000}:8000"
-    command: >
-      sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/readyz"]
       interval: 5s
       timeout: 5s
       retries: 10
       start_period: 10s
 
   scheduler:
-    build:
-      context: ./backend
-    restart: unless-stopped
-    env_file:
-      - .env
-    environment:
-      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://pulse:pulse@postgres:5432/pulse}
+    <<: *backend
     depends_on:
-      api:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     command: python -m app.engine.scheduler
-
-  seed:
-    build:
-      context: ./backend
-    restart: "no"
-    env_file:
-      - .env
-    environment:
-      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://pulse:pulse@postgres:5432/pulse}
-    depends_on:
-      api:
-        condition: service_healthy
-    command: python -m app.seed
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9101/metrics"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
 
   worker:
-    build:
-      context: ./backend
-    restart: unless-stopped
-    env_file:
-      - .env
+    <<: *backend
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://pulse:pulse@postgres:5432/pulse}
       WORKER_PROJECT_SLUG: ${WORKER_PROJECT_SLUG:-demo}
       WORKER_QUEUES: ${WORKER_QUEUES:-}
       WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-5}
+    # restart policy is what "heals" a worker after a chaos kill (exit 137)
+    restart: always
     depends_on:
-      api:
-        condition: service_healthy
       seed:
         condition: service_completed_successfully
     command: python -m app.worker.main
+    stop_grace_period: 40s  # > WORKER_SHUTDOWN_GRACE_SEC so drains can finish
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.worker.healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
   frontend:
     build:
@@ -90,7 +99,43 @@ services:
       api:
         condition: service_healthy
     ports:
-      - "${FRONTEND_PORT:-5173}:80"
+      - "${FRONTEND_PORT:-5173}:8080"
+
+  # --- observability --------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.53.2
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+      - --web.enable-lifecycle
+    volumes:
+      - ./deploy/prometheus:/etc/prometheus:ro
+      - pulse_prometheus:/prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    depends_on:
+      - api
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/pulse-overview.json
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - pulse_grafana:/var/lib/grafana
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    depends_on:
+      - prometheus
 
 volumes:
   pulse_pgdata:
+  pulse_prometheus:
+  pulse_grafana:

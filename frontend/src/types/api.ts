@@ -180,6 +180,21 @@ export interface WorkerInfo {
   last_heartbeat_at: string | null
   cpu_percent: number | null
   ram_mb: number | null
+  chaos_kill_requested_at: string | null
+}
+
+export interface ChaosStatus {
+  enabled: boolean
+  mode: "kubernetes" | "signal" | string
+  live_workers: number
+}
+
+export interface ChaosKillResult {
+  worker_id: string
+  worker_name: string
+  target: string
+  mode: string
+  detail: string
 }
 
 export interface WorkerHeartbeat {

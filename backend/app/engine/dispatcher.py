@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.errors import NotFoundError
+from app.core.errors import ConflictError, NotFoundError
 from app.models.dead_letter import DeadLetterEntry
 from app.models.enums import JobStatus
 from app.models.job import Job
@@ -29,9 +29,12 @@ async def move_to_dlq(db: AsyncSession, job: Job, final_error: str) -> DeadLette
 
 async def replay_from_dlq(db: AsyncSession, dlq_entry: DeadLetterEntry) -> Job:
     """Requeue the original job for a DLQ entry and mark the entry replayed."""
-    job = await db.get(Job, dlq_entry.job_id)
+    job = await db.get(Job, dlq_entry.job_id, with_for_update=True)
     if job is None:
         raise NotFoundError("Original job no longer exists")
+    if job.status != JobStatus.dead:
+        # e.g. it was already retried directly via POST /jobs/{id}/retry
+        raise ConflictError(f"Job is no longer dead (status '{job.status.value}')")
 
     job.status = JobStatus.queued
     job.attempts = 0

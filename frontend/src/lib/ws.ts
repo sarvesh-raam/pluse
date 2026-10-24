@@ -23,6 +23,20 @@ export function useLiveUpdates(projectId: string | null) {
     let retryTimeout: ReturnType<typeof setTimeout> | null = null
     let attempt = 0
 
+    // A burst of events (up to 200 job.updated per publisher tick) used to
+    // trigger one invalidation each — hundreds of refetch storms per second.
+    // Collect the distinct keys and flush them together instead.
+    const pending = new Map<string, readonly unknown[]>()
+    let flushTimer: ReturnType<typeof setTimeout> | null = null
+    function invalidate(queryKey: readonly unknown[]) {
+      pending.set(JSON.stringify(queryKey), queryKey)
+      flushTimer ??= setTimeout(() => {
+        flushTimer = null
+        for (const key of pending.values()) queryClient.invalidateQueries({ queryKey: key })
+        pending.clear()
+      }, 300)
+    }
+
     function connect() {
       if (cancelled) return
       const protocol = window.location.protocol === "https:" ? "wss" : "ws"
@@ -45,21 +59,21 @@ export function useLiveUpdates(projectId: string | null) {
         }
         switch (msg.type) {
           case "job.updated":
-            queryClient.invalidateQueries({ queryKey: ["jobs"] })
-            queryClient.invalidateQueries({ queryKey: ["job", msg.data.id] })
-            queryClient.invalidateQueries({ queryKey: ["batchProgress"] })
+            invalidate(["jobs"])
+            invalidate(["job", msg.data.id])
+            invalidate(["batchProgress"])
             break
           case "worker.updated":
-            queryClient.invalidateQueries({ queryKey: ["workers"] })
-            queryClient.invalidateQueries({ queryKey: ["worker", msg.data.id] })
+            invalidate(["workers"])
+            invalidate(["worker", msg.data.id])
             break
           case "queue.stats":
-            queryClient.invalidateQueries({ queryKey: ["queues"] })
-            queryClient.invalidateQueries({ queryKey: ["queueStats", msg.data.queue_id] })
+            invalidate(["queues"])
+            invalidate(["queueStats", msg.data.queue_id])
             break
           case "metrics.tick":
             queryClient.setQueryData(["metricsLive", projectId], msg.data)
-            queryClient.invalidateQueries({ queryKey: ["metricsOverview"] })
+            invalidate(["metricsOverview"])
             break
         }
       }
@@ -80,6 +94,7 @@ export function useLiveUpdates(projectId: string | null) {
     return () => {
       cancelled = true
       if (retryTimeout) clearTimeout(retryTimeout)
+      if (flushTimer) clearTimeout(flushTimer)
       socket?.close()
     }
   }, [projectId, accessToken, queryClient])

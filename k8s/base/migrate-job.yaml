@@ -1,0 +1,44 @@
+# Runs `alembic upgrade head` (and the idempotent demo seed) before the new
+# version rolls out. Jobs are immutable, so the CD pipeline deletes the
+# previous run first and waits for this one to complete.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: pulse-migrate
+spec:
+  backoffLimit: 6
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: pulse-migrate
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: pulse-runtime
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: migrate
+          image: pulse-backend
+          command: ["sh", "-c"]
+          args:
+            - alembic upgrade head && if [ "$RUN_SEED" = "true" ]; then python -m app.seed; fi
+          env:
+            - {name: RUN_SEED, value: "true"}
+          envFrom:
+            - configMapRef: {name: pulse-config}
+            - secretRef: {name: pulse-secrets}
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tmp
+          emptyDir: {}

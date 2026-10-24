@@ -1,7 +1,7 @@
 import uuid
 
 from fastapi import APIRouter, Depends, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -107,6 +107,9 @@ async def invite_member(
     membership: OrganizationMember = Depends(require_role(MemberRole.admin)),
     db: AsyncSession = Depends(get_db),
 ) -> MemberOut:
+    if body.role == MemberRole.owner:
+        _ensure_can_manage_owner_role(membership)
+
     target_user = await db.scalar(select(User).where(User.email == body.email))
     if target_user is None:
         raise NotFoundError("No registered user with this email")
@@ -134,12 +137,19 @@ async def invite_member(
 
 
 async def _count_owners(db: AsyncSession, org_id: uuid.UUID) -> int:
-    owners = await db.scalars(
-        select(OrganizationMember).where(
-            OrganizationMember.org_id == org_id, OrganizationMember.role == MemberRole.owner
-        )
-    )
-    return len(owners.all())
+    return await db.scalar(
+        select(func.count())
+        .select_from(OrganizationMember)
+        .where(OrganizationMember.org_id == org_id, OrganizationMember.role == MemberRole.owner)
+    ) or 0
+
+
+def _ensure_can_manage_owner_role(actor: OrganizationMember) -> None:
+    """Admins manage members/viewers/admins, but only an owner may grant,
+    change or revoke the owner role — otherwise any admin could promote
+    themselves to owner and then demote or remove the real owners."""
+    if actor.role != MemberRole.owner:
+        raise ForbiddenError("Only an owner can grant, change or revoke the owner role")
 
 
 @router.patch("/{org_id}/members/{member_id}", response_model=MemberOut)
@@ -157,6 +167,9 @@ async def update_member_role(
     )
     if target is None:
         raise NotFoundError("Membership not found")
+
+    if MemberRole.owner in (target.role, body.role):
+        _ensure_can_manage_owner_role(membership)
 
     if target.role == MemberRole.owner and body.role != MemberRole.owner:
         if await _count_owners(db, org_id) <= 1:
@@ -190,6 +203,8 @@ async def remove_member(
     if target is None:
         raise NotFoundError("Membership not found")
 
+    if target.role == MemberRole.owner:
+        _ensure_can_manage_owner_role(membership)
     if target.role == MemberRole.owner and await _count_owners(db, org_id) <= 1:
         raise ForbiddenError("Cannot remove the last remaining owner")
 

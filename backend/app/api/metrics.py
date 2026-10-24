@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.core.errors import UnprocessableError
 from app.core.rbac import ensure_role
 from app.core.scoping import get_project_or_404
@@ -21,7 +22,8 @@ from app.schemas.metrics import MetricsOverview, QueueMetric, ThroughputBucket, 
 
 router = APIRouter(prefix="/metrics", tags=["metrics"])
 
-_WINDOW_RE = re.compile(r"^(\d+)([mhd])$")
+_WINDOW_RE = re.compile(r"^(\d{1,6})([mhd])$")
+MAX_WINDOW_SEC = 90 * 86400
 
 
 def _parse_window(window: str) -> tuple[timedelta, str]:
@@ -30,7 +32,10 @@ def _parse_window(window: str) -> tuple[timedelta, str]:
         raise UnprocessableError(f"invalid window {window!r} — expected e.g. 30m, 1h, 24h, 7d")
 
     value, unit = int(match.group(1)), match.group(2)
-    delta = {"m": timedelta(minutes=value), "h": timedelta(hours=value), "d": timedelta(days=value)}[unit]
+    seconds_per_unit = {"m": 60, "h": 3600, "d": 86400}[unit]
+    if value <= 0 or value * seconds_per_unit > MAX_WINDOW_SEC:
+        raise UnprocessableError("window must be between 1m and 90d")
+    delta = timedelta(seconds=value * seconds_per_unit)
 
     seconds = delta.total_seconds()
     if seconds <= 3600 * 2:
@@ -78,7 +83,14 @@ async def metrics_overview(
     active_workers = await db.scalar(
         select(func.count())
         .select_from(Worker)
-        .where(Worker.project_id == project_id, Worker.status == WorkerStatus.active)
+        .where(
+            Worker.project_id == project_id,
+            # "active" = alive: busy or idle, with a heartbeat inside the
+            # visibility timeout (a crashed worker stays 'active' in the DB
+            # until the reaper notices it)
+            Worker.status.in_([WorkerStatus.active, WorkerStatus.idle]),
+            Worker.last_heartbeat_at >= now - timedelta(seconds=get_settings().visibility_timeout_sec),
+        )
     ) or 0
 
     queue_depth_total = await db.scalar(
@@ -151,47 +163,52 @@ async def metrics_queues(
     project = await get_project_or_404(db, project_id)
     await ensure_role(db, user, project.org_id, MemberRole.viewer)
 
-    queues = (await db.scalars(select(Queue).where(Queue.project_id == project_id))).all()
+    queues = (
+        await db.scalars(select(Queue).where(Queue.project_id == project_id).order_by(Queue.name))
+    ).all()
+
+    status_counts: dict[uuid.UUID, dict[JobStatus, int]] = {}
+    for queue_id, job_status, count in (
+        await db.execute(
+            select(Job.queue_id, Job.status, func.count())
+            .join(Queue, Queue.id == Job.queue_id)
+            .where(Queue.project_id == project_id)
+            .group_by(Job.queue_id, Job.status)
+        )
+    ).all():
+        status_counts.setdefault(queue_id, {})[job_status] = count
+
+    avg_durations = dict(
+        (
+            await db.execute(
+                select(Job.queue_id, func.avg(JobExecution.duration_ms))
+                .select_from(JobExecution)
+                .join(Job, Job.id == JobExecution.job_id)
+                .join(Queue, Queue.id == Job.queue_id)
+                .where(
+                    Queue.project_id == project_id,
+                    JobExecution.status == ExecutionStatus.completed,
+                    JobExecution.duration_ms.is_not(None),
+                )
+                .group_by(Job.queue_id)
+            )
+        ).all()
+    )
 
     results: list[QueueMetric] = []
     for queue in queues:
-        depth = await db.scalar(
-            select(func.count()).select_from(Job).where(Job.queue_id == queue.id, Job.status == JobStatus.queued)
-        ) or 0
-        running = await db.scalar(
-            select(func.count())
-            .select_from(Job)
-            .where(Job.queue_id == queue.id, Job.status.in_([JobStatus.claimed, JobStatus.running]))
-        ) or 0
-        completed = await db.scalar(
-            select(func.count()).select_from(Job).where(Job.queue_id == queue.id, Job.status == JobStatus.completed)
-        ) or 0
-        failed_or_dead = await db.scalar(
-            select(func.count())
-            .select_from(Job)
-            .where(Job.queue_id == queue.id, Job.status.in_([JobStatus.failed, JobStatus.dead]))
-        ) or 0
+        counts = status_counts.get(queue.id, {})
+        completed = counts.get(JobStatus.completed, 0)
+        failed_or_dead = counts.get(JobStatus.failed, 0) + counts.get(JobStatus.dead, 0)
         terminal = completed + failed_or_dead
-        success_rate = completed / terminal if terminal > 0 else None
-
-        avg_duration = await db.scalar(
-            select(func.avg(JobExecution.duration_ms))
-            .select_from(JobExecution)
-            .join(Job, Job.id == JobExecution.job_id)
-            .where(
-                Job.queue_id == queue.id,
-                JobExecution.status == ExecutionStatus.completed,
-                JobExecution.duration_ms.is_not(None),
-            )
-        )
-
+        avg_duration = avg_durations.get(queue.id)
         results.append(
             QueueMetric(
                 queue_id=queue.id,
                 name=queue.name,
-                depth=depth,
-                running=running,
-                success_rate=success_rate,
+                depth=counts.get(JobStatus.queued, 0),
+                running=counts.get(JobStatus.claimed, 0) + counts.get(JobStatus.running, 0),
+                success_rate=completed / terminal if terminal > 0 else None,
                 avg_duration_ms=float(avg_duration) if avg_duration is not None else None,
             )
         )

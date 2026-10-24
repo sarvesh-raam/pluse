@@ -4,7 +4,8 @@ from fastapi import APIRouter, Depends, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.errors import ConflictError
+from app.core.errors import ConflictError, UnprocessableError
+from app.core.notify import notify_jobs_available
 from app.core.pagination import Page, PaginationParams, apply_sort, paginate
 from app.core.rbac import ensure_role
 from app.core.scoping import get_project_or_404, get_queue_scoped
@@ -14,10 +15,26 @@ from app.models.enums import ExecutionStatus, JobStatus, MemberRole
 from app.models.job import Job
 from app.models.job_execution import JobExecution
 from app.models.queue import Queue
+from app.models.retry_policy import RetryPolicy
 from app.models.user import User
 from app.schemas.queue import QueueCreate, QueueOut, QueueStats, QueueUpdate
 
 router = APIRouter(prefix="/queues", tags=["queues"])
+
+
+async def _validate_retry_policy(
+    db: AsyncSession, retry_policy_id: uuid.UUID | None, project_id: uuid.UUID
+) -> None:
+    """A queue may only reference a retry policy from its own project —
+    otherwise anyone could attach (and read the settings of) another
+    tenant's policy just by knowing its id."""
+    if retry_policy_id is None:
+        return
+    policy_project_id = await db.scalar(
+        select(RetryPolicy.project_id).where(RetryPolicy.id == retry_policy_id)
+    )
+    if policy_project_id != project_id:
+        raise UnprocessableError("retry_policy_id does not refer to a retry policy in this project")
 
 
 @router.get("", response_model=Page[QueueOut])
@@ -51,6 +68,7 @@ async def create_queue(
     )
     if existing is not None:
         raise ConflictError("A queue with this name already exists in this project")
+    await _validate_retry_policy(db, body.retry_policy_id, body.project_id)
 
     queue = Queue(**body.model_dump())
     db.add(queue)
@@ -84,6 +102,8 @@ async def update_queue(
         )
         if existing is not None:
             raise ConflictError("A queue with this name already exists in this project")
+    if "retry_policy_id" in updates:
+        await _validate_retry_policy(db, updates["retry_policy_id"], queue.project_id)
 
     for field, value in updates.items():
         setattr(queue, field, value)
@@ -125,6 +145,9 @@ async def resume_queue(
 ) -> Queue:
     queue = await get_queue_scoped(db, queue_id, user, MemberRole.admin)
     queue.is_paused = False
+    # jobs may have piled up while paused — wake workers now rather than on
+    # their next poll tick
+    await notify_jobs_available(db)
     await db.commit()
     await db.refresh(queue)
     return queue

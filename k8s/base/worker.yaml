@@ -1,0 +1,101 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pulse-worker
+spec:
+  replicas: 3
+  strategy:
+    rollingUpdate: {maxUnavailable: 1, maxSurge: 1}
+  selector:
+    matchLabels:
+      app: pulse-worker
+  template:
+    metadata:
+      labels:
+        app: pulse-worker
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9100"
+    spec:
+      serviceAccountName: pulse-runtime
+      # SIGTERM -> the worker drains in-flight jobs for up to
+      # WORKER_SHUTDOWN_GRACE_SEC (30s) before marking itself dead
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile: {type: RuntimeDefault}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector: {matchLabels: {app: pulse-worker}}
+      containers:
+        - name: worker
+          image: pulse-backend
+          command: ["python", "-m", "app.worker.main"]
+          ports:
+            - {name: metrics, containerPort: 9100}
+          envFrom:
+            - configMapRef: {name: pulse-config}
+            - secretRef: {name: pulse-secrets}
+          # Self-healing: a worker whose event loop wedges stops touching its
+          # heartbeat file, fails this probe, and kubelet restarts it. A
+          # crashed or chaos-killed worker is replaced by the Deployment
+          # directly; either way the reaper requeues its stranded jobs.
+          livenessProbe:
+            exec: {command: ["python", "-m", "app.worker.healthcheck"]}
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {memory: 512Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pulse-worker-metrics
+  labels:
+    app: pulse-worker
+spec:
+  clusterIP: None
+  selector:
+    app: pulse-worker
+  ports:
+    - {name: metrics, port: 9100, targetPort: metrics}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pulse-worker
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: pulse-worker
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: pulse-worker
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: pulse-worker}
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource: {name: cpu, target: {type: Utilization, averageUtilization: 70}}
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300

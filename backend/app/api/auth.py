@@ -1,10 +1,11 @@
 import uuid
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.errors import ConflictError, UnauthorizedError
+from app.core.errors import ConflictError, TooManyRequestsError, UnauthorizedError
+from app.core.ratelimit import login_limiter
 from app.core.security import (
     create_access_token,
     create_refresh_token,
@@ -47,10 +48,19 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)) ->
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)) -> TokenResponse:
+async def login(
+    body: LoginRequest, request: Request, db: AsyncSession = Depends(get_db)
+) -> TokenResponse:
+    client_ip = request.client.host if request.client else "unknown"
+    limiter_key = f"{client_ip}|{body.email.lower()}"
+    if login_limiter.is_blocked(limiter_key):
+        raise TooManyRequestsError("Too many failed login attempts — try again in a few minutes")
+
     user = await db.scalar(select(User).where(User.email == body.email))
     if user is None or not verify_password(body.password, user.password_hash):
+        login_limiter.record_failure(limiter_key)
         raise UnauthorizedError("Invalid email or password")
+    login_limiter.reset(limiter_key)
 
     return TokenResponse(
         access_token=create_access_token(user.id),

@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pulse-config
+data:
+  ENV: production
+  LOG_LEVEL: INFO
+  HEARTBEAT_SEC: "5"
+  VISIBILITY_TIMEOUT_SEC: "30"
+  WORKER_PROJECT_SLUG: demo
+  WORKER_CONCURRENCY: "5"
+  WORKER_SHUTDOWN_GRACE_SEC: "30"
+  CHAOS_ENABLED: "true"
+  CHAOS_MODE: auto
+  CORS_ORIGINS: '["https://pulse.example.com"]'
+---
+# Placeholder values so `kubectl apply -k` works out of the box on a demo
+# cluster. For anything real, create this Secret out-of-band (sealed-secrets,
+# external-secrets, `kubectl create secret ...`) and delete it from here.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pulse-secrets
+type: Opaque
+stringData:
+  DATABASE_URL: postgresql+asyncpg://pulse:pulse-demo-password@postgres:5432/pulse
+  POSTGRES_PASSWORD: pulse-demo-password
+  JWT_SECRET: CHANGE-ME-generate-with-openssl-rand-hex-32-xxxxxxxxxxxx
+  GROQ_API_KEY: ""

@@ -1,5 +1,7 @@
 import { useAuthStore } from "@/lib/auth-store"
 import type {
+  ChaosKillResult,
+  ChaosStatus,
   DeadLetterEntry,
   Job,
   JobBatchProgress,
@@ -51,11 +53,17 @@ async function refreshAccessToken(): Promise<string | null> {
   const { refreshToken, setTokens, logout } = useAuthStore.getState()
   if (!refreshToken) return null
 
-  const res = await fetch(`${API_BASE}/auth/refresh`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ refresh_token: refreshToken }),
-  })
+  let res: Response
+  try {
+    res = await fetch(`${API_BASE}/auth/refresh`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refresh_token: refreshToken }),
+    })
+  } catch {
+    // network blip: keep the session, the caller surfaces "Session expired"
+    return null
+  }
   if (!res.ok) {
     logout()
     return null
@@ -208,6 +216,15 @@ export const jobsApi = {
     idempotency_key?: string
     depends_on?: string[]
   }) => apiFetch<Job>("/jobs", { method: "POST", body: JSON.stringify(body) }),
+  createBatch: (body: {
+    queue_id: string
+    jobs: { handler: string; payload?: Record<string, unknown>; priority?: number }[]
+    run_at?: string
+  }) =>
+    apiFetch<{ batch_id: string; jobs: Job[] }>("/jobs/batch", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   get: (id: string) => apiFetch<Job>(`/jobs/${id}`),
   retry: (id: string) => apiFetch<Job>(`/jobs/${id}/retry`, { method: "POST" }),
   cancel: (id: string) => apiFetch<Job>(`/jobs/${id}/cancel`, { method: "POST" }),
@@ -223,6 +240,22 @@ export const jobsApi = {
     payload?: Record<string, unknown>
   }) => apiFetch<ScheduledJob>("/jobs/schedule", { method: "POST", body: JSON.stringify(body) }),
   schedules: (queueId: string) => apiFetch<ScheduledJob[]>(`/jobs/schedule${qs({ queue_id: queueId })}`),
+  setScheduleActive: (id: string, isActive: boolean) =>
+    apiFetch<ScheduledJob>(`/jobs/schedule/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ is_active: isActive }),
+    }),
+  deleteSchedule: (id: string) => apiFetch<void>(`/jobs/schedule/${id}`, { method: "DELETE" }),
+}
+
+// --- chaos engineering ---
+export const chaosApi = {
+  status: (projectId: string) => apiFetch<ChaosStatus>(`/chaos/status${qs({ project_id: projectId })}`),
+  kill: (projectId: string, workerId?: string) =>
+    apiFetch<ChaosKillResult>("/chaos/kill", {
+      method: "POST",
+      body: JSON.stringify({ project_id: projectId, worker_id: workerId ?? null }),
+    }),
 }
 
 // --- workers ---

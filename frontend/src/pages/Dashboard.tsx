@@ -11,6 +11,7 @@ import { EmptyState } from "@/components/shared/EmptyState"
 import { ThroughputChart } from "@/components/charts/ThroughputChart"
 import { WorkerTelemetryChart } from "@/components/charts/WorkerTelemetryChart"
 import { LoadGenerator } from "@/components/shared/LoadGenerator"
+import { ChaosPanel } from "@/components/shared/ChaosPanel"
 import { Skeleton } from "@/components/ui/skeleton"
 
 export function Dashboard() {
@@ -26,9 +27,11 @@ export function Dashboard() {
     queryFn: () => metricsApi.throughput(projectId, "1h"),
     refetchInterval: 5000,
   })
+  // Jobs never rest in "failed": a failed attempt moves to "retrying" or,
+  // once attempts are exhausted, "dead". "dead" is what needs attention.
   const { data: failedJobs } = useQuery({
-    queryKey: ["jobs", projectId, { status: "failed" }],
-    queryFn: () => jobsApi.list({ project_id: projectId, status: "failed", size: 6, sort: "updated_at" }),
+    queryKey: ["jobs", projectId, { status: "dead" }],
+    queryFn: () => jobsApi.list({ project_id: projectId, status: "dead", size: 6, sort: "updated_at" }),
     refetchInterval: 5000,
   })
   const { data: workers } = useQuery({
@@ -111,6 +114,10 @@ export function Dashboard() {
 
       <div data-tour="load-generator" className="mt-6">
         <LoadGenerator />
+      </div>
+
+      <div className="mt-6">
+        <ChaosPanel />
       </div>
 
       <div data-tour="recent-failures" className="mt-6">

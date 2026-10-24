@@ -12,14 +12,16 @@ class JobCreate(BaseModel):
     type: JobType
     handler: str = Field(min_length=1, max_length=200)
     payload: dict[str, Any] = Field(default_factory=dict)
-    priority: int = 0
+    priority: int = Field(default=0, ge=-1000, le=1000)
     run_at: datetime | None = None
-    max_attempts: int | None = Field(default=None, ge=1)
+    max_attempts: int | None = Field(default=None, ge=1, le=100)
     idempotency_key: str | None = Field(default=None, max_length=200)
-    depends_on: list[uuid.UUID] | None = None
+    depends_on: list[uuid.UUID] | None = Field(default=None, max_length=100)
 
     @model_validator(mode="after")
     def _validate_type(self) -> "JobCreate":
+        if self.run_at is not None and self.run_at.tzinfo is None:
+            raise ValueError("run_at must include a timezone offset (e.g. 2026-01-01T00:00:00Z)")
         if self.type in (JobType.batch, JobType.recurring):
             raise ValueError(
                 "type must be one of immediate, delayed, scheduled — "
@@ -59,7 +61,7 @@ class JobOut(BaseModel):
 class BatchJobItem(BaseModel):
     handler: str = Field(min_length=1, max_length=200)
     payload: dict[str, Any] = Field(default_factory=dict)
-    priority: int = 0
+    priority: int = Field(default=0, ge=-1000, le=1000)
     idempotency_key: str | None = Field(default=None, max_length=200)
 
 
@@ -67,6 +69,15 @@ class JobBatchCreate(BaseModel):
     queue_id: uuid.UUID
     jobs: list[BatchJobItem] = Field(min_length=1, max_length=1000)
     run_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def _validate(self) -> "JobBatchCreate":
+        if self.run_at is not None and self.run_at.tzinfo is None:
+            raise ValueError("run_at must include a timezone offset")
+        keys = [j.idempotency_key for j in self.jobs if j.idempotency_key]
+        if len(keys) != len(set(keys)):
+            raise ValueError("idempotency_key values must be unique within a batch")
+        return self
 
 
 class JobBatchOut(BaseModel):
@@ -86,6 +97,10 @@ class JobScheduleCreate(BaseModel):
     timezone: str = "UTC"
     handler: str = Field(min_length=1, max_length=200)
     payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class ScheduledJobUpdate(BaseModel):
+    is_active: bool
 
 
 class ScheduledJobOut(BaseModel):

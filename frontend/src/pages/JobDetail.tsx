@@ -71,6 +71,7 @@ export function JobDetail() {
     mutationFn: () => jobsApi.retry(jobId!),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["job", jobId] })
+      queryClient.invalidateQueries({ queryKey: ["executions", jobId] })
       toast.success("Job requeued")
     },
     onError: (err) => toast.error(err instanceof ApiError ? err.message : "Retry failed"),

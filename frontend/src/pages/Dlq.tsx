@@ -18,8 +18,12 @@ export function Dlq() {
 
   const { data: queues } = useQuery({ queryKey: ["queues", projectId], queryFn: () => queuesApi.list(projectId) })
 
+  // (re)select a queue whenever the current one isn't in this project's list
+  // — e.g. after switching projects, which used to keep showing (and trying
+  // to replay into) the previous project's queue
   useEffect(() => {
-    if (!queueId && queues?.items.length) setQueueId(queues.items[0].id)
+    if (!queues) return
+    if (!queues.items.some((q) => q.id === queueId)) setQueueId(queues.items[0]?.id ?? "")
   }, [queues, queueId])
 
   const { data: entries } = useQuery({
@@ -33,6 +37,7 @@ export function Dlq() {
     mutationFn: (id: string) => dlqApi.replay(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["dlq", queueId] })
+      queryClient.invalidateQueries({ queryKey: ["jobs"] })
       toast.success("Job replayed — back in the queue")
     },
     onError: (err) => toast.error(err instanceof ApiError ? err.message : "Replay failed"),

@@ -1,5 +1,6 @@
 import { type FormEvent, useState } from "react"
 import { useNavigate } from "react-router-dom"
+import { useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
 import { ArrowRight } from "lucide-react"
 import { orgsApi, projectsApi, ApiError } from "@/lib/api"
@@ -12,31 +13,44 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 
 function slugify(value: string): string {
-  return value
+  const base = value
     .toLowerCase()
     .trim()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/(^-|-$)/g, "")
+    .slice(0, 60)
+  // Org slugs are globally unique and names like "日本" slugify to "", so
+  // always add a short random suffix rather than failing with a 409/422.
+  const suffix = Math.random().toString(36).slice(2, 7)
+  return base ? `${base}-${suffix}` : `workspace-${suffix}`
 }
 
 export function Onboarding() {
   const navigate = useNavigate()
   const setWorkspace = useAuthStore((s) => s.setWorkspace)
+  const queryClient = useQueryClient()
   const [orgName, setOrgName] = useState("")
   const [projectName, setProjectName] = useState("")
   const [loading, setLoading] = useState(false)
+  // if project creation fails after the org was created, a retry must reuse
+  // that org instead of creating a second one
+  const [createdOrgId, setCreatedOrgId] = useState<string | null>(null)
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault()
     setLoading(true)
     try {
-      const org = await orgsApi.create({ name: orgName, slug: slugify(orgName) })
+      const org = createdOrgId
+        ? { id: createdOrgId }
+        : await orgsApi.create({ name: orgName, slug: slugify(orgName) })
+      setCreatedOrgId(org.id)
       const project = await projectsApi.create({
         org_id: org.id,
         name: projectName,
         slug: slugify(projectName),
       })
       setWorkspace(org.id, project.id)
+      await queryClient.invalidateQueries({ queryKey: ["orgs"] })
       navigate("/app/dashboard")
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Setup failed")

@@ -26,11 +26,11 @@ class Project(Base):
 
     organization: Mapped["Organization"] = relationship(back_populates="projects")
     retry_policies: Mapped[list["RetryPolicy"]] = relationship(
-        back_populates="project", cascade="all, delete-orphan"
+        back_populates="project", cascade="all, delete-orphan", passive_deletes=True
     )
     queues: Mapped[list["Queue"]] = relationship(
-        back_populates="project", cascade="all, delete-orphan"
+        back_populates="project", cascade="all, delete-orphan", passive_deletes=True
     )
     workers: Mapped[list["Worker"]] = relationship(
-        back_populates="project", cascade="all, delete-orphan"
+        back_populates="project", cascade="all, delete-orphan", passive_deletes=True
     )

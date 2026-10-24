@@ -24,17 +24,35 @@ docker compose up -d --build
 ```
 
 That's it — one command brings up Postgres, runs migrations, seeds demo
-data, and starts the API, scheduler, worker, and frontend.
+data, and starts the API, scheduler, worker, frontend, Prometheus and Grafana.
 
 - **Dashboard:** http://localhost:5173 — log in with `demo@pulse.dev` / `demo1234`
-- **API:** http://localhost:8000 (interactive docs at `/docs`)
+- **API:** http://localhost:8000 (interactive docs at `/docs`, Prometheus metrics at `/metrics`)
+- **Prometheus:** http://localhost:9090 (targets, 7 alert rules)
+- **Grafana:** http://localhost:3000 — the *Pulse — Overview* dashboard is the home page (anonymous view, `admin`/`admin` to edit)
 - **Postgres:** `localhost:5432` (user/pass `pulse`/`pulse`, db `pulse`)
 
-Scale workers to see distributed claiming in action:
+Scale workers to see distributed claiming in action (Prometheus discovers
+the new replicas automatically):
 
 ```bash
 docker compose up -d --scale worker=3
 ```
+
+### Chaos demo: kill a worker and watch it heal
+
+1. Dashboard → **Load Generator** → *Blast Jobs* (or use a long `sleep` job).
+2. Dashboard or Workers → **Kill a random worker** (or the skull on one
+   worker's card; or `python backend/cli.py cluster kill --project <id>`).
+3. Watch: the worker process exits with code 137 mid-job → Docker (or
+   Kubernetes) starts a replacement within seconds → after
+   `VISIBILITY_TIMEOUT_SEC` (30s) the reaper marks the old worker dead and
+   requeues its stranded jobs, each with a `WorkerLost` attempt in its
+   execution history → the new worker finishes them. Grafana's
+   *Self-healing* panel shows the kill and the recoveries.
+
+On Kubernetes the button deletes the worker's **pod** (`gracePeriodSeconds=0`)
+instead; see [Kubernetes](#kubernetes).
 
 ## What's here
 
@@ -44,6 +62,39 @@ docker compose up -d --scale worker=3
 | Database schema (13 tables), indexes, cascades | [docs/er-diagram.md](docs/er-diagram.md) |
 | REST API reference | [docs/api.md](docs/api.md) |
 | Design trade-offs (Postgres vs. Redis, normalization, at-least-once vs. exactly-once, retries/jitter, idempotency) + all 8 bonus features | [docs/design-decisions.md](docs/design-decisions.md) |
+
+## Kubernetes
+
+`k8s/base` is a Kustomize tree: namespace (Pod Security `restricted`),
+config + secret, demo Postgres StatefulSet, a migration Job, and Deployments
+for the API (2 replicas, HPA, PDB), scheduler (2 replicas, leader-elected),
+workers (3 replicas, HPA, PDB, liveness probe on the heartbeat) and
+frontend, plus an Ingress. Every container runs non-root with a read-only
+root filesystem.
+
+```bash
+kubectl apply -k k8s/base                 # everything
+kubectl apply -k k8s/monitoring           # optional: ServiceMonitors + PrometheusRule (Prometheus Operator)
+kubectl -n pulse get pods -w              # then hit the chaos button and watch a worker pod get replaced
+```
+
+Before using it for anything real: replace the placeholder `pulse-secrets`
+Secret (real `JWT_SECRET`, managed-database `DATABASE_URL`), drop
+`postgres.yaml`, and set the Ingress host and `CORS_ORIGINS`.
+
+## CI/CD
+
+- **CI** (`.github/workflows/ci.yml`, every push and PR): backend lint
+  (ruff) + migrations up/down/up + the full pytest suite against a real
+  Postgres service container; frontend lint + typecheck + build; Kustomize
+  render validated with kubeconform and the Prometheus config/rules with
+  promtool; Docker builds on PRs.
+- **CD** (`.github/workflows/cd.yml`, after CI passes on `main`): builds and
+  pushes `ghcr.io/<owner>/pulse-backend` and `pulse-frontend` tagged with the
+  commit SHA and `latest`. If the repo variable `DEPLOY_ENABLED=true` and the
+  secret `KUBE_CONFIG` (base64 kubeconfig) are set, it also pins those
+  images in Kustomize, runs the migration Job, waits for every rollout,
+  smoke-tests `/readyz`, and rolls back automatically on failure.
 
 ## Tech stack
 
@@ -55,13 +106,17 @@ docker compose up -d --scale worker=3
 - **AI failure summaries:** Groq (`llama-3.3-70b-versatile`)
 - **Frontend:** React + Vite + TypeScript, Tailwind v4, shadcn/ui, TanStack Query, Zustand, Recharts, react-router
 - **Testing:** pytest, pytest-asyncio, httpx
+- **Ops:** Prometheus (`prometheus-client`), Grafana, Kubernetes (Kustomize), GitHub Actions, GHCR
 
 ## Project layout
 
 ```
 pulse/
-├── docker-compose.yml
+├── docker-compose.yml      postgres, migrate, seed, api, scheduler, worker, frontend, prometheus, grafana
 ├── .env.example
+├── .github/workflows/      ci.yml (lint, tests, manifest validation), cd.yml (GHCR publish + k8s rollout)
+├── k8s/                    base/ (Kustomize app + RBAC + probes/HPA/PDB), monitoring/ (Prometheus Operator)
+├── deploy/                 prometheus/ (scrape config + alerts), grafana/ (provisioned dashboard), huggingface/
 ├── docs/                   architecture.md, er-diagram.md, api.md, design-decisions.md
 ├── backend/
 │   ├── alembic/            migrations (hand-written, not autogenerated — see design-decisions.md)
@@ -96,7 +151,11 @@ cd backend
 python -m venv .venv && .venv/Scripts/activate   # or source .venv/bin/activate on macOS/Linux
 pip install -e ".[dev]"
 pytest -v
+ruff check app tests cli.py
 ```
+
+Postgres somewhere other than `localhost:5432`? Set `TEST_PG_HOST` /
+`TEST_PG_PORT`. The suite only ever touches its own `pulse_test` database.
 
 Covers the critical paths per the rubric: claim atomicity under concurrent
 claimants (including a concurrency-limit-under-contention variant), retry

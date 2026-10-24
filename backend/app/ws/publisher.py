@@ -17,6 +17,7 @@ from app.ws.manager import manager
 logger = logging.getLogger("pulse.ws")
 
 POLL_INTERVAL_SEC = 2.0
+JOB_UPDATES_PER_TICK = 200
 
 
 class EventPublisher:
@@ -50,28 +51,38 @@ class EventPublisher:
         if not project_ids:
             return
 
-        now = datetime.now(timezone.utc)
+        # forget projects nobody is watching any more; otherwise a client
+        # reconnecting hours later gets every job update since then replayed
+        for stale in set(self._last_check) - set(project_ids):
+            del self._last_check[stale]
+
         async with AsyncSessionLocal() as db:
+            # use the DB clock for the watermark: updated_at is set by the
+            # DB's now(), and app/DB clock skew would otherwise drop or
+            # duplicate events
+            now = await db.scalar(select(func.now()))
             for project_id in project_ids:
                 since = self._last_check.get(
                     project_id, now - timedelta(seconds=POLL_INTERVAL_SEC * 2)
                 )
-                await self._broadcast_job_updates(db, project_id, since)
+                truncated_at = await self._broadcast_job_updates(db, project_id, since)
                 await self._broadcast_worker_updates(db, project_id, since)
                 await self._broadcast_queue_stats(db, project_id)
                 await self._broadcast_metrics_tick(db, project_id)
-                self._last_check[project_id] = now
+                # if a burst exceeded the per-tick cap, resume from the last
+                # row sent instead of silently skipping the rest
+                self._last_check[project_id] = truncated_at or now
 
     async def _broadcast_job_updates(
         self, db: AsyncSession, project_id: uuid.UUID, since: datetime
-    ) -> None:
+    ) -> datetime | None:
         rows = (
             await db.execute(
                 select(Job.id, Job.status, Job.queue_id, Job.updated_at)
                 .join(Queue, Queue.id == Job.queue_id)
                 .where(Queue.project_id == project_id, Job.updated_at > since)
                 .order_by(Job.updated_at.asc())
-                .limit(200)
+                .limit(JOB_UPDATES_PER_TICK)
             )
         ).all()
         for row in rows:
@@ -86,6 +97,9 @@ class EventPublisher:
                     },
                 },
             )
+        if len(rows) == JOB_UPDATES_PER_TICK:
+            return rows[-1].updated_at
+        return None
 
     async def _broadcast_worker_updates(
         self, db: AsyncSession, project_id: uuid.UUID, since: datetime
@@ -117,20 +131,22 @@ class EventPublisher:
 
     async def _broadcast_queue_stats(self, db: AsyncSession, project_id: uuid.UUID) -> None:
         queues = (await db.scalars(select(Queue).where(Queue.project_id == project_id))).all()
-        for queue in queues:
-            depth = await db.scalar(
-                select(func.count())
-                .select_from(Job)
-                .where(Job.queue_id == queue.id, Job.status == JobStatus.queued)
-            )
-            running = await db.scalar(
-                select(func.count())
-                .select_from(Job)
-                .where(
-                    Job.queue_id == queue.id,
-                    Job.status.in_([JobStatus.claimed, JobStatus.running]),
+        if not queues:
+            return
+        counts: dict[tuple[uuid.UUID, JobStatus], int] = {
+            (queue_id, job_status): count
+            for queue_id, job_status, count in (
+                await db.execute(
+                    select(Job.queue_id, Job.status, func.count())
+                    .where(
+                        Job.queue_id.in_([q.id for q in queues]),
+                        Job.status.in_([JobStatus.queued, JobStatus.claimed, JobStatus.running]),
+                    )
+                    .group_by(Job.queue_id, Job.status)
                 )
-            )
+            ).all()
+        }
+        for queue in queues:
             await manager.broadcast(
                 project_id,
                 {
@@ -138,8 +154,9 @@ class EventPublisher:
                     "data": {
                         "queue_id": str(queue.id),
                         "name": queue.name,
-                        "depth": depth or 0,
-                        "running": running or 0,
+                        "depth": counts.get((queue.id, JobStatus.queued), 0),
+                        "running": counts.get((queue.id, JobStatus.claimed), 0)
+                        + counts.get((queue.id, JobStatus.running), 0),
                         "is_paused": queue.is_paused,
                     },
                 },

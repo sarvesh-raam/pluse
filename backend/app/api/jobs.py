@@ -1,19 +1,21 @@
 import uuid
 from datetime import datetime, timezone
-
-from fastapi import APIRouter, Depends, Query, Response, status
-from sqlalchemy import func, select
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from app.core.errors import ConflictError, ForbiddenError, NotFoundError, UnprocessableError
+from croniter import croniter
+from fastapi import APIRouter, Depends, Query, Response, status
+from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.errors import ConflictError, NotFoundError, UnprocessableError
 from app.core.notify import notify_jobs_available
 from app.core.pagination import Page, PaginationParams, apply_sort, paginate
 from app.core.rbac import ensure_role
 from app.core.scoping import get_job_scoped, get_project_or_404, get_queue_scoped
 from app.core.security import get_current_user
 from app.db import get_db
+from app.models.dead_letter import DeadLetterEntry
 from app.models.enums import JobStatus, JobType, MemberRole
 from app.models.job import Job
 from app.models.job_execution import JobExecution
@@ -31,19 +33,10 @@ from app.schemas.job import (
     JobOut,
     JobScheduleCreate,
     ScheduledJobOut,
+    ScheduledJobUpdate,
 )
 
-try:
-    from croniter import croniter
-except ImportError:  # pragma: no cover
-    croniter = None
-
 router = APIRouter(prefix="/jobs", tags=["jobs"])
-
-NON_CLAIMABLE_TERMINAL = {
-    JobStatus.completed,
-    JobStatus.cancelled,
-}
 
 
 def _initial_status_and_run_at(
@@ -67,12 +60,31 @@ def _initial_status_and_run_at(
     )
 
 
-async def _validate_depends_on(db: AsyncSession, depends_on: list[uuid.UUID] | None) -> None:
+async def _validate_depends_on(
+    db: AsyncSession, depends_on: list[uuid.UUID] | None, project_id: uuid.UUID
+) -> None:
+    """Every prerequisite must exist *in the same project*. Checking bare
+    existence would let a caller probe for (and couple their workflow to)
+    job ids belonging to other tenants."""
     if not depends_on:
         return
-    count = await db.scalar(select(func.count()).select_from(Job).where(Job.id.in_(depends_on)))
+    count = await db.scalar(
+        select(func.count())
+        .select_from(Job)
+        .join(Queue, Queue.id == Job.queue_id)
+        .where(Job.id.in_(depends_on), Queue.project_id == project_id)
+    )
     if count != len(set(depends_on)):
-        raise UnprocessableError("One or more depends_on job ids do not exist")
+        raise UnprocessableError("One or more depends_on job ids do not exist in this project")
+
+
+async def _lock_job(db: AsyncSession, job: Job) -> Job:
+    """Re-read the job under a row lock before a state transition so a
+    concurrent worker claim (or reaper sweep) can't interleave between our
+    status check and our write — e.g. cancelling a job a worker claimed a
+    millisecond earlier, which would then run anyway."""
+    await db.refresh(job, with_for_update=True)
+    return job
 
 
 @router.get("", response_model=Page[JobOut])
@@ -121,7 +133,7 @@ async def create_job(
             response.status_code = status.HTTP_200_OK
             return existing
 
-    await _validate_depends_on(db, body.depends_on)
+    await _validate_depends_on(db, body.depends_on, queue.project_id)
 
     job_status, run_at = _initial_status_and_run_at(body.run_at, bool(body.depends_on))
     max_attempts = body.max_attempts or (
@@ -236,14 +248,14 @@ async def create_schedule(
 
     try:
         tz = ZoneInfo(body.timezone)
-    except ZoneInfoNotFoundError:
-        raise UnprocessableError(f"Unknown timezone: {body.timezone}")
+    except (ZoneInfoNotFoundError, ValueError):
+        raise UnprocessableError(f"Unknown timezone: {body.timezone}") from None
 
     try:
         base = datetime.now(tz)
         next_run_at = croniter(body.cron_expr, base).get_next(datetime)
     except (ValueError, KeyError):
-        raise UnprocessableError(f"Invalid cron expression: {body.cron_expr}")
+        raise UnprocessableError(f"Invalid cron expression: {body.cron_expr}") from None
 
     scheduled_job = ScheduledJob(
         queue_id=queue.id,
@@ -274,6 +286,47 @@ async def list_schedules(
     return list(rows.all())
 
 
+async def _get_schedule_scoped(
+    db: AsyncSession, schedule_id: uuid.UUID, user: User, minimum: MemberRole
+) -> ScheduledJob:
+    schedule = await db.get(ScheduledJob, schedule_id)
+    if schedule is None:
+        raise NotFoundError("Schedule not found")
+    await get_queue_scoped(db, schedule.queue_id, user, minimum)
+    return schedule
+
+
+@router.patch("/schedule/{schedule_id}", response_model=ScheduledJobOut)
+async def update_schedule(
+    schedule_id: uuid.UUID,
+    body: ScheduledJobUpdate,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> ScheduledJob:
+    """Pause/resume a cron schedule. Resuming recomputes next_run_at from
+    now, so a schedule paused for a week doesn't fire immediately on resume."""
+    schedule = await _get_schedule_scoped(db, schedule_id, user, MemberRole.member)
+    if body.is_active and not schedule.is_active:
+        schedule.next_run_at = croniter(
+            schedule.cron_expr, datetime.now(ZoneInfo(schedule.timezone))
+        ).get_next(datetime)
+    schedule.is_active = body.is_active
+    await db.commit()
+    await db.refresh(schedule)
+    return schedule
+
+
+@router.delete("/schedule/{schedule_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_schedule(
+    schedule_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    schedule = await _get_schedule_scoped(db, schedule_id, user, MemberRole.member)
+    await db.delete(schedule)
+    await db.commit()
+
+
 @router.get("/{job_id}", response_model=JobOut)
 async def get_job(
     job_id: uuid.UUID,
@@ -291,9 +344,19 @@ async def retry_job(
     db: AsyncSession = Depends(get_db),
 ) -> Job:
     job, _queue = await get_job_scoped(db, job_id, user, MemberRole.member)
+    await _lock_job(db, job)
 
     if job.status not in (JobStatus.failed, JobStatus.dead):
-        raise ForbiddenError(f"Cannot retry a job in status '{job.status.value}'")
+        raise ConflictError(f"Cannot retry a job in status '{job.status.value}'")
+
+    # Retrying a dead job directly supersedes its pending DLQ entry; leaving
+    # it unreplayed would let a later "replay" re-run a job that has since
+    # completed.
+    await db.execute(
+        update(DeadLetterEntry)
+        .where(DeadLetterEntry.job_id == job.id, DeadLetterEntry.replayed_at.is_(None))
+        .values(replayed_at=func.now())
+    )
 
     job.status = JobStatus.queued
     job.run_at = datetime.now(timezone.utc)
@@ -317,10 +380,11 @@ async def cancel_job(
     db: AsyncSession = Depends(get_db),
 ) -> Job:
     job, _queue = await get_job_scoped(db, job_id, user, MemberRole.member)
+    await _lock_job(db, job)
 
     cancellable = {JobStatus.scheduled, JobStatus.queued, JobStatus.retrying}
     if job.status not in cancellable:
-        raise ForbiddenError(f"Cannot cancel a job in status '{job.status.value}'")
+        raise ConflictError(f"Cannot cancel a job in status '{job.status.value}'")
 
     job.status = JobStatus.cancelled
     job.finished_at = datetime.now(timezone.utc)

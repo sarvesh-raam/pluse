@@ -26,16 +26,21 @@ export function AppShell() {
 
   // Auto-select the first org/project so the demo user lands straight on
   // populated data instead of an empty picker.
+  // Also repairs a stale persisted selection (org deleted, membership
+  // revoked, project removed) — previously that left every page stuck on
+  // 403/404s with no way out short of clearing localStorage.
   useEffect(() => {
-    if (!currentOrgId && orgs?.items.length) {
+    if (!orgs?.items.length) return
+    if (!currentOrgId || !orgs.items.some((o) => o.id === currentOrgId)) {
       setWorkspace(orgs.items[0].id, null)
     }
   }, [orgs, currentOrgId, setWorkspace])
 
   useEffect(() => {
-    if (currentOrgId && !currentProjectId && projects?.items.length) {
-      setWorkspace(currentOrgId, projects.items[0].id)
-    }
+    if (!currentOrgId || !projects) return
+    if (currentProjectId && projects.items.some((p) => p.id === currentProjectId)) return
+    const next = projects.items[0]?.id ?? null
+    if (next !== currentProjectId) setWorkspace(currentOrgId, next)
   }, [projects, currentOrgId, currentProjectId, setWorkspace])
 
   const { connected } = useLiveUpdates(currentProjectId)

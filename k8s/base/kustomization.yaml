@@ -1,0 +1,30 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: pulse
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: pulse
+    includeSelectors: false
+
+resources:
+  - namespace.yaml
+  - config.yaml
+  - rbac.yaml
+  - postgres.yaml
+  - migrate-job.yaml
+  - api.yaml
+  - scheduler.yaml
+  - worker.yaml
+  - frontend.yaml
+  - ingress.yaml
+
+# CI overrides these with the commit SHA (see .github/workflows/cd.yml):
+#   kustomize edit set image pulse-backend=ghcr.io/<owner>/pulse-backend:<sha>
+images:
+  - name: pulse-backend
+    newName: ghcr.io/sarvesh-raam/pulse-backend
+    newTag: latest
+  - name: pulse-frontend
+    newName: ghcr.io/sarvesh-raam/pulse-frontend
+    newTag: latest
